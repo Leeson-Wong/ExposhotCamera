@@ -1,5 +1,6 @@
 import nativeCamera from 'libexpocamera.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { image } from '@kit.ImageKit';
 
 const DOMAIN = 0x3200;
 const TAG = 'Index';
@@ -46,10 +47,15 @@ struct Index {
   @State focusPointX: number = 0.5;
   @State focusPointY: number = 0.5;
 
+  @State capturedImage: PixelMap | undefined = undefined;
+
   private xComponentControllerA: XComponentController = new XComponentController();
   private xComponentControllerB: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
+    // 注册图像数据回调（拍照完成后会调用）
+    nativeCamera.registerImageDataCallback(this.processPhotoBufferWrapper);
+
     // 订阅相机状态
     nativeCamera.subscribeState((state: string, message: string) => {
       hilog.info(DOMAIN, TAG, 'Camera state: %{public}s, message: %{public}s', state, message);
@@ -103,6 +109,7 @@ struct Index {
   // 注册观察者
   registerObserver(surfaceId: string): string {
     const slotId = nativeCamera.registerObserver(surfaceId, this.onPreviewChanged);
+    nativeCamera.startPreview(surfaceId)
     hilog.info(DOMAIN, TAG, 'registerObserver: slotId=%{public}s', slotId);
     return slotId;
   }
@@ -146,6 +153,22 @@ struct Index {
     }
   }
 
+  processPhotoBufferWrapper = (buffer: ArrayBuffer) => {
+    // hilog.info(DOMAIN, TAG, 'Photo callback, size: %{public}d', arrayBuffer.byteLength);
+    // this.cameraStatus = `Photo captured: ${arrayBuffer.byteLength} bytes`;
+    this.processPhotoBuffer(buffer)
+  }
+
+  async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
+    try {
+      const imageSource = image.createImageSource(buffer)
+      const pixelMap = await imageSource.createPixelMap()
+      this.capturedImage = pixelMap
+    } catch (error) {
+      console.error('Failed to process photo buffer:', error)
+    }
+  }
+
   // 拍照
   takePhoto(): void {
     if (!this.photoReady) {
@@ -154,10 +177,8 @@ struct Index {
       return;
     }
 
-    const result = nativeCamera.takePhoto((arrayBuffer: ArrayBuffer) => {
-      hilog.info(DOMAIN, TAG, 'Photo callback, size: %{public}d', arrayBuffer.byteLength);
-      this.cameraStatus = `Photo captured: ${arrayBuffer.byteLength} bytes`;
-    });
+    // takePhoto 只触发拍照动作，回调通过 registerImageDataCallback 注册
+    const result = nativeCamera.takePhoto();
 
     hilog.info(DOMAIN, TAG, 'takePhoto result: %{public}d', result);
     if (result === 0) {
@@ -225,11 +246,21 @@ struct Index {
 
       // 双 Surface 预览区域 - 上下排列（田字格）
       Column() {
-        // 上方 Slot A
-        this.buildSlotA()
+        Stack() {
+          Column() {
+            // 上方 Slot A
+            this.buildSlotA()
 
-        // 下方 Slot B
-        this.buildSlotB()
+            // 下方 Slot B
+            this.buildSlotB()
+          }.width('100%').height('100%')
+
+          Column() {
+            Row() {
+              Image(this.capturedImage).width(80).height(100).border({width: 1, color: 'red'})
+            }.width('100%').justifyContent(FlexAlign.End)
+          }.width('100%').height('100%').justifyContent(FlexAlign.End)
+        }.width('100%').height('100%')
       }
       .layoutWeight(1)
       .width('100%')

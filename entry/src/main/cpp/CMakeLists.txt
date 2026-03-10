@@ -18,4 +18,7 @@ target_link_libraries(expocamera PUBLIC
     libhilog_ndk.z.so
     libohcamera.so
     libohimage.so
+    libimage_receiver.so
+    libnative_image.so
+    libnative_buffer.so
 )

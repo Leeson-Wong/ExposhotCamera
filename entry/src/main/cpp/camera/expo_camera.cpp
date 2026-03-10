@@ -86,6 +86,7 @@ Camera_ErrorCode ExpoCamera::release() {
     }
 
     previewing_ = false;
+    photoOutputAdded_ = false;
 
     // 释放 Session
     if (captureSession_) {
@@ -163,14 +164,22 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
         // 继续尝试切换
     }
 
-    // 2. 开始重新配置
+    // 2. 重新设置 SessionMode（必须在 BeginConfig 之前！）
+    err = OH_CaptureSession_SetSessionMode(captureSession_, Camera_SceneMode::NORMAL_PHOTO);
+    if (err != CAMERA_OK) {
+        OH_LOG_WARN(LOG_APP, "Failed to re-set session mode: %{public}d", err);
+    } else {
+        OH_LOG_INFO(LOG_APP, "Session mode re-set to NORMAL_PHOTO before BeginConfig");
+    }
+
+    // 3. 开始重新配置
     err = OH_CaptureSession_BeginConfig(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to begin config: %{public}d", err);
         return err;
     }
 
-    // 3. 移除旧的 PreviewOutput
+    // 4. 移除旧的 PreviewOutput
     if (previewOutput_) {
         err = OH_CaptureSession_RemovePreviewOutput(captureSession_, previewOutput_);
         if (err != CAMERA_OK) {
@@ -181,6 +190,15 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
             OH_LOG_WARN(LOG_APP, "Failed to release preview output: %{public}d", err);
         }
         previewOutput_ = nullptr;
+    }
+
+    // 4. 移除 PhotoOutput（需要在 BeginConfig 后移除，稍后重新添加）
+    if (photoOutputAdded_ && photoOutput_) {
+        err = OH_CaptureSession_RemovePhotoOutput(captureSession_, photoOutput_);
+        if (err != CAMERA_OK) {
+            OH_LOG_WARN(LOG_APP, "Failed to remove photo output: %{public}d", err);
+        }
+        photoOutputAdded_ = false;
     }
 
     // 4. 创建新的 PreviewOutput
@@ -204,7 +222,19 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
         return err;
     }
 
-    // 6. 提交配置
+    // 6. 重新添加 PhotoOutput
+    if (photoOutput_) {
+        err = OH_CaptureSession_AddPhotoOutput(captureSession_, photoOutput_);
+        if (err != CAMERA_OK) {
+            OH_LOG_WARN(LOG_APP, "Failed to re-add photo output: %{public}d", err);
+            // 拍照功能可选，继续
+        } else {
+            photoOutputAdded_ = true;
+            OH_LOG_INFO(LOG_APP, "PhotoOutput re-added to session");
+        }
+    }
+
+    // 7. 提交配置
     err = OH_CaptureSession_CommitConfig(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to commit config: %{public}d", err);
@@ -242,6 +272,15 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
 
     Camera_ErrorCode err;
 
+    // 设置会话模式为普通拍照模式（关键！不设置会导致拍照返回 CAMERA_OPERATION_NOT_ALLOWED）
+    err = OH_CaptureSession_SetSessionMode(captureSession_, Camera_SceneMode::NORMAL_PHOTO);
+    if (err != CAMERA_OK) {
+        OH_LOG_WARN(LOG_APP, "Failed to set session mode: %{public}d", err);
+        // 继续尝试，某些设备可能不需要
+    } else {
+        OH_LOG_INFO(LOG_APP, "Session mode set to NORMAL_PHOTO");
+    }
+
     // 开始配置 Session
     err = OH_CaptureSession_BeginConfig(captureSession_);
     if (err != CAMERA_OK) {
@@ -272,8 +311,15 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     }
 
     // 创建并添加 PhotoOutput（用于拍照）
-    err = createPhotoOutput();
-    if (err == CAMERA_OK) {
+    // 如果 PhotoOutput 已存在，直接复用
+    if (!photoOutput_) {
+        err = createPhotoOutput();
+        if (err != CAMERA_OK) {
+            OH_LOG_WARN(LOG_APP, "Failed to create photo output, photo feature unavailable");
+        }
+    }
+
+    if (photoOutput_) {
         err = OH_CaptureSession_AddPhotoOutput(captureSession_, photoOutput_);
         if (err != CAMERA_OK) {
             OH_LOG_WARN(LOG_APP, "Failed to add photo output: %{public}d", err);
@@ -282,8 +328,6 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
             photoOutputAdded_ = true;
             OH_LOG_INFO(LOG_APP, "PhotoOutput added to session");
         }
-    } else {
-        OH_LOG_WARN(LOG_APP, "Failed to create photo output, photo feature unavailable");
     }
 
     // 提交配置
@@ -332,7 +376,7 @@ Camera_ErrorCode ExpoCamera::stopPreview() {
     return CAMERA_OK;
 }
 
-Camera_ErrorCode ExpoCamera::takePhoto(const PhotoCallback& callback) {
+Camera_ErrorCode ExpoCamera::takePhoto() {
 //    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
@@ -345,15 +389,13 @@ Camera_ErrorCode ExpoCamera::takePhoto(const PhotoCallback& callback) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-    if (!photoOutput_) {
-        OH_LOG_ERROR(LOG_APP, "PhotoOutput not ready");
+    if (!photoOutput_ || !photoOutputAdded_) {
+        OH_LOG_ERROR(LOG_APP, "PhotoOutput not ready or not added to session (photoOutput=%{public}p, added=%{public}d)",
+                     photoOutput_, photoOutputAdded_);
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-    // 保存回调
-    photoCallback_ = callback;
-
-    // 触发拍照
+    // 触发拍照（回调通过 setPhotoCallback 提前注册）
     Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to capture: %{public}d", err);
@@ -389,6 +431,110 @@ void ExpoCamera::onFrameEnd(Camera_PhotoOutput* photoOutput, int32_t frameCount)
 
 void ExpoCamera::onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode errorCode) {
     OH_LOG_ERROR(LOG_APP, "Photo output error: %{public}d", errorCode);
+}
+
+// 照片可用回调（获取实际照片数据）
+void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNative* photo) {
+    OH_LOG_INFO(LOG_APP, "onPhotoAvailable start!");
+
+    if (photo == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "onPhotoAvailable: photo is null");
+        return;
+    }
+
+    ExpoCamera& self = ExpoCamera::getInstance();
+
+    // 获取主图像
+    OH_ImageNative* imageNative = nullptr;
+    Camera_ErrorCode errCode = OH_PhotoNative_GetMainImage(photo, &imageNative);
+    if (errCode != CAMERA_OK || imageNative == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "OH_PhotoNative_GetMainImage failed: %{public}d", errCode);
+        return;
+    }
+
+    // 获取图像尺寸
+    Image_Size size;
+    Image_ErrorCode imageErr = OH_ImageNative_GetImageSize(imageNative, &size);
+    if (imageErr != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetImageSize failed: %{public}d", imageErr);
+        OH_ImageNative_Release(imageNative);
+        return;
+    }
+    OH_LOG_INFO(LOG_APP, "Photo size: %{public}d x %{public}d", size.width, size.height);
+
+    // 获取组件类型数量
+    size_t componentTypeSize = 0;
+    imageErr = OH_ImageNative_GetComponentTypes(imageNative, nullptr, &componentTypeSize);
+    if (imageErr != IMAGE_SUCCESS || componentTypeSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetComponentTypes failed: %{public}d", imageErr);
+        OH_ImageNative_Release(imageNative);
+        return;
+    }
+
+    // 获取组件类型列表
+    uint32_t* components = new (std::nothrow) uint32_t[componentTypeSize];
+    if (!components) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for components");
+        OH_ImageNative_Release(imageNative);
+        return;
+    }
+    imageErr = OH_ImageNative_GetComponentTypes(imageNative, &components, &componentTypeSize);
+    if (imageErr != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetComponentTypes failed: %{public}d", imageErr);
+        OH_ImageNative_Release(imageNative);
+        delete[] components;
+        return;
+    }
+
+    // 获取缓冲区
+    OH_NativeBuffer* nativeBuffer = nullptr;
+    imageErr = OH_ImageNative_GetByteBuffer(imageNative, components[0], &nativeBuffer);
+    if (imageErr != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetByteBuffer failed: %{public}d", imageErr);
+        OH_ImageNative_Release(imageNative);
+        delete[] components;
+        return;
+    }
+
+    // 获取缓冲区大小
+    size_t nativeBufferSize = 0;
+    imageErr = OH_ImageNative_GetBufferSize(imageNative, components[0], &nativeBufferSize);
+    if (imageErr != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetBufferSize failed: %{public}d", imageErr);
+        OH_ImageNative_Release(imageNative);
+        delete[] components;
+        return;
+    }
+    OH_LOG_INFO(LOG_APP, "Buffer size: %{public}zu", nativeBufferSize);
+
+    // 映射内存
+    void* virAddr = nullptr;
+    int32_t ret = OH_NativeBuffer_Map(nativeBuffer, &virAddr);
+    if (ret != 0) {
+        OH_LOG_ERROR(LOG_APP, "OH_NativeBuffer_Map failed: %{public}d", ret);
+        OH_ImageNative_Release(imageNative);
+        delete[] components;
+        return;
+    }
+
+    // 复制数据并调用回调
+    if (self.photoCallback_) {
+        void* bufferCopy = malloc(nativeBufferSize);
+        if (bufferCopy) {
+            std::memcpy(bufferCopy, virAddr, nativeBufferSize);
+            self.photoCallback_(bufferCopy, nativeBufferSize);
+            free(bufferCopy);
+        }
+    } else {
+        OH_LOG_WARN(LOG_APP, "No photo callback set");
+    }
+
+    // 释放资源
+    delete[] components;
+    OH_NativeBuffer_Unmap(nativeBuffer);
+    OH_ImageNative_Release(imageNative);
+
+    OH_LOG_INFO(LOG_APP, "onPhotoAvailable end");
 }
 
 Camera_ErrorCode ExpoCamera::setZoomRatio(float ratio) {
@@ -698,13 +844,19 @@ Camera_ErrorCode ExpoCamera::createPreviewOutput(const std::string& surfaceId) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-    // 获取支持的输出能力
+    // 获取支持的输出能力（优先使用带场景模式的版本，与 PhotoOutput 保持一致）
     Camera_OutputCapability* outputCapability = nullptr;
-    Camera_ErrorCode err = OH_CameraManager_GetSupportedCameraOutputCapability(
-        cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+    Camera_ErrorCode err = OH_CameraManager_GetSupportedCameraOutputCapabilityWithSceneMode(
+        cameraManager_, &cameras_[currentCameraIndex_], Camera_SceneMode::NORMAL_PHOTO, &outputCapability);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to get output capability: %{public}d", err);
-        return err;
+        OH_LOG_WARN(LOG_APP, "Failed to get output capability with scene mode: %{public}d, fallback to default", err);
+        // 回退到不带场景模式的版本
+        err = OH_CameraManager_GetSupportedCameraOutputCapability(
+            cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+        if (err != CAMERA_OK) {
+            OH_LOG_ERROR(LOG_APP, "Failed to get output capability: %{public}d", err);
+            return err;
+        }
     }
 
     // 获取预览 Profile
@@ -735,13 +887,19 @@ Camera_ErrorCode ExpoCamera::createPhotoOutput() {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-    // 获取支持的输出能力
+    // 获取支持的输出能力（优先使用带场景模式的版本）
     Camera_OutputCapability* outputCapability = nullptr;
-    Camera_ErrorCode err = OH_CameraManager_GetSupportedCameraOutputCapability(
-        cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+    Camera_ErrorCode err = OH_CameraManager_GetSupportedCameraOutputCapabilityWithSceneMode(
+        cameraManager_, &cameras_[currentCameraIndex_], Camera_SceneMode::NORMAL_PHOTO, &outputCapability);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to get output capability: %{public}d", err);
-        return err;
+        OH_LOG_WARN(LOG_APP, "Failed to get output capability with scene mode: %{public}d, fallback to default", err);
+        // 回退到不带场景模式的版本
+        err = OH_CameraManager_GetSupportedCameraOutputCapability(
+            cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+        if (err != CAMERA_OK) {
+            OH_LOG_ERROR(LOG_APP, "Failed to get output capability: %{public}d", err);
+            return err;
+        }
     }
 
     // 获取拍照 Profile
@@ -761,19 +919,13 @@ Camera_ErrorCode ExpoCamera::createPhotoOutput() {
         return err;
     }
 
-    // 注册拍照回调
-    PhotoOutput_Callbacks callbacks;
-    callbacks.onFrameStart = ExpoCamera::onFrameStart;
-    callbacks.onFrameShutter = ExpoCamera::onFrameShutter;
-    callbacks.onFrameEnd = ExpoCamera::onFrameEnd;
-    callbacks.onError = ExpoCamera::onError;
-
-    err = OH_PhotoOutput_RegisterCallback(photoOutput_, &callbacks);
+    // 注册照片可用回调（使用 OH_PhotoOutput_RegisterPhotoAvailableCallback）
+    err = OH_PhotoOutput_RegisterPhotoAvailableCallback(photoOutput_, ExpoCamera::onPhotoAvailable);
     if (err != CAMERA_OK) {
-        OH_LOG_WARN(LOG_APP, "Failed to register photo callback: %{public}d", err);
+        OH_LOG_WARN(LOG_APP, "Failed to register photo available callback: %{public}d", err);
         // 回调注册失败不影响拍照，只是无法获取数据
     } else {
-        OH_LOG_INFO(LOG_APP, "Photo callback registered");
+        OH_LOG_INFO(LOG_APP, "Photo available callback registered");
     }
 
     OH_LOG_INFO(LOG_APP, "PhotoOutput created");

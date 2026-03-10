@@ -13,6 +13,7 @@
 static napi_ref g_photoCallbackRef = nullptr;
 static napi_env g_env = nullptr;
 static std::mutex g_callbackMutex;
+static size_t g_photoSize = 0;  // 保存照片大小，用于异步回调
 
 // 观察者回调存储
 struct ObserverCallbackInfo {
@@ -28,39 +29,66 @@ static napi_ref g_stateCallbackRef = nullptr;
 static napi_env g_stateEnv = nullptr;
 static std::mutex g_stateMutex;
 
-// 保存照片数据，用于回调
+// 保存照片数据，用于回调（使用异步工作队列）
 static void onPhotoData(void* buffer, size_t size) {
-//    std::lock_guard<std::mutex> lock(g_callbackMutex);
-
     if (!g_photoCallbackRef || !g_env || !buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Photo callback not ready or invalid buffer");
         return;
     }
 
-    napi_value callback;
-    napi_get_reference_value(g_env, g_photoCallbackRef, &callback);
+    OH_LOG_INFO(LOG_APP, "onPhotoData size:%{public}zu", size);
+    g_photoSize = size;
 
-    if (!callback) {
-        OH_LOG_ERROR(LOG_APP, "Callback is null");
+    // 复制 buffer 数据
+    void* copyBuffer = malloc(size);
+    if (copyBuffer == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for photo buffer");
+        return;
+    }
+    std::memcpy(copyBuffer, buffer, size);
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_env, "onPhotoData", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_env, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段（空操作，数据已准备好）
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            void* outputData = nullptr;
+            napi_value arrayBuffer = nullptr;
+            size_t bufferSize = g_photoSize;
+
+            napi_create_arraybuffer(envLocal, bufferSize, &outputData, &arrayBuffer);
+            std::memcpy(outputData, data, bufferSize);
+
+            OH_LOG_INFO(LOG_APP, "onPhotoData async callback, size: %{public}zu", g_photoSize);
+
+            napi_get_reference_value(envLocal, g_photoCallbackRef, &callback);
+            if (callback) {
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 1, &arrayBuffer, &retVal);
+            } else {
+                OH_LOG_ERROR(LOG_APP, "onPhotoData callback is null");
+            }
+
+            // 清理内存
+            free(data);
+        },
+        copyBuffer, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo callback");
+        free(copyBuffer);
         return;
     }
 
-    // 创建 ArrayBuffer
-    void* data = nullptr;
-    napi_value arrayBuffer;
-    napi_create_arraybuffer(g_env, size, &data, &arrayBuffer);
-
-    // 复制数据
-    memcpy(data, buffer, size);
-
-    // 调用回调
-    napi_value global;
-    napi_get_global(g_env, &global);
-
-    napi_value argv[1] = { arrayBuffer };
-    napi_call_function(g_env, global, callback, 1, argv, nullptr);
-
-    OH_LOG_INFO(LOG_APP, "Photo callback invoked, size=%{public}zu", size);
+    napi_queue_async_work_with_qos(g_env, work, napi_qos_user_initiated);
 }
 
 // 预览流变化回调（观察者模式 - 通知所有观察者）
@@ -430,39 +458,56 @@ static napi_value IsZoomSupported(napi_env env, napi_callback_info info) {
 }
 
 static napi_value TakePhoto(napi_env env, napi_callback_info info) {
+    // takePhoto 只作为动作触发，不接收参数
+    // 回调需要先通过 registerImageDataCallback 注册
+
+    ExpoCamera& camera = ExpoCamera::getInstance();
+    Camera_ErrorCode err = camera.takePhoto();
+
+    napi_value result;
+    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    return result;
+}
+
+// 注册图像数据回调函数
+static napi_value RegisterImageDataCallback(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
 
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     if (argc < 1) {
-        napi_value result;
-        napi_create_int32(env, Camera_ErrorCode::CAMERA_INVALID_ARGUMENT, &result);
-        return result;
+        napi_throw_error(env, nullptr, "Wrong number of arguments");
+        return nullptr;
+    }
+
+    napi_valuetype type;
+    napi_typeof(env, args[0], &type);
+    if (type != napi_function) {
+        napi_throw_type_error(env, nullptr, "Argument must be a function");
+        return nullptr;
     }
 
     // 保存回调引用
     {
-//        std::lock_guard<std::mutex> lock(g_callbackMutex);
-
         // 释放旧的回调引用
         if (g_photoCallbackRef) {
             napi_delete_reference(g_env, g_photoCallbackRef);
             g_photoCallbackRef = nullptr;
         }
 
-        // 创建新的引用
         g_env = env;
         napi_create_reference(env, args[0], 1, &g_photoCallbackRef);
     }
 
-    // 设置回调并触发拍照
+    // 设置 C++ 层回调
     ExpoCamera& camera = ExpoCamera::getInstance();
     camera.setPhotoCallback(onPhotoData);
-    Camera_ErrorCode err = camera.takePhoto(onPhotoData);
+
+    OH_LOG_INFO(LOG_APP, "ImageDataCallback registered");
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_get_undefined(env, &result);
     return result;
 }
 
@@ -644,6 +689,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"startPreview", nullptr, StartPreview, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopPreview", nullptr, StopPreview, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takePhoto", nullptr, TakePhoto, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"registerImageDataCallback", nullptr, RegisterImageDataCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isPhotoOutputReady", nullptr, IsPhotoOutputReady, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZoomRatio", nullptr, SetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getZoomRatio", nullptr, GetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},

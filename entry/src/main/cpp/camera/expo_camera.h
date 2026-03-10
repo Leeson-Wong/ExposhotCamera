@@ -43,7 +43,7 @@ public:
 
     // 拍照
     using PhotoCallback = std::function<void(void* buffer, size_t size)>;
-    Camera_ErrorCode takePhoto(const PhotoCallback& callback);
+    Camera_ErrorCode takePhoto();  // 只触发拍照动作，不接收参数
     void setPhotoCallback(const PhotoCallback& callback) { photoCallback_ = callback; }
 
     // 相机参数
@@ -106,6 +106,9 @@ private:
     static void onFrameShutter(Camera_PhotoOutput* photoOutput, Camera_FrameShutterInfo* info);
     static void onFrameEnd(Camera_PhotoOutput* photoOutput, int32_t frameCount);
     static void onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode errorCode);
+
+    // 照片可用回调（用于获取拍照数据）
+    static void onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNative* photo);
 
     // 相机资源
     Camera_Manager* cameraManager_ = nullptr;

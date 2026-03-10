@@ -54,11 +54,24 @@ export const startPreview: (surfaceId: string) => number;
 export const stopPreview: () => number;
 
 /**
- * 拍照
- * @param callback 照片回调函数，参数为照片数据的 ArrayBuffer
+ * 图像数据回调函数类型
+ * @param arrayBuffer 照片数据的 ArrayBuffer
+ */
+export type ImageDataCallback = (arrayBuffer: ArrayBuffer) => void;
+
+/**
+ * 注册图像数据回调函数
+ * 拍照完成后会通过此回调返回图像数据
+ * @param callback 图像数据回调函数
+ */
+export const registerImageDataCallback: (callback: ImageDataCallback) => void;
+
+/**
+ * 拍照（只触发拍照动作，不接收参数）
+ * 拍照完成后，图像数据会通过 registerImageDataCallback 注册的回调返回
  * @returns 0 成功，其他值表示错误码
  */
-export const takePhoto: (callback: (arrayBuffer: ArrayBuffer) => void) => number;
+export const takePhoto: () => number;
 
 /**
  * 检查拍照输出是否就绪
