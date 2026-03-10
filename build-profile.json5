@@ -1,0 +1,56 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BFE0F7E6649E7DC74F3DF111B69E2116A70C0460356E40C9F7C9CB5D1B0861FE18C6CB39C861BAF",
+          "profile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p12",
+          "storePassword": "0000001B7B630D27ADB7C417CD91F600B5BE1780CA384E57F79EAF4076B28A9F70490098E181840EA001A2"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.1.0(23)",
+        "compatibleSdkVersion": "6.0.2(22)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
