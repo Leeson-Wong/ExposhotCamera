@@ -82,6 +82,8 @@ public:
     using StateCallback = std::function<void(const std::string& state, const std::string& message)>;
     void subscribeState(const StateCallback& callback);
     void unsubscribeState();
+    
+    void AddToTask(void* buffer, size_t bufferSize);
 
 private:
     ExpoCamera();

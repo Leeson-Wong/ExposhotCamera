@@ -1,7 +1,9 @@
+#include <cstdint>
 #include <napi/native_api.h>
 #include <mutex>
 #include <map>
 #include "expo_camera.h"
+#include "burst_capture.h"
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -28,6 +30,12 @@ static std::mutex g_observerMutex;
 static napi_ref g_stateCallbackRef = nullptr;
 static napi_env g_stateEnv = nullptr;
 static std::mutex g_stateMutex;
+
+// 连拍相关全局存储
+static napi_ref g_burstProgressCallbackRef = nullptr;
+static napi_ref g_burstImageCallbackRef = nullptr;
+static napi_env g_burstEnv = nullptr;
+static std::mutex g_burstMutex;
 
 // 保存照片数据，用于回调（使用异步工作队列）
 static void onPhotoData(void* buffer, size_t size) {
@@ -680,6 +688,268 @@ static napi_value UnsubscribeState(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ========== 连拍相关 NAPI 方法 ==========
+
+// 连拍图像数据回调 (内部使用)
+static void onBurstImageCallback(void* buffer, size_t size, bool isFinal) {
+    if (!g_burstImageCallbackRef || !g_burstEnv || !buffer) {
+        OH_LOG_ERROR(LOG_APP, "Burst image callback not ready");
+        return;
+    }
+
+    OH_LOG_INFO(LOG_APP, "onBurstImageCallback size: %{public}zu, isFinal: %{public}d", size, isFinal);
+
+    // 复制 buffer 数据
+    void* copyBuffer = malloc(size);
+    if (copyBuffer == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for burst image buffer");
+        return;
+    }
+    std::memcpy(copyBuffer, buffer, size);
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_burstEnv, "onBurstImage", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    // 将 isFinal 作为 data 的一部分传递
+    struct BurstImageData {
+        void* buffer;
+        size_t size;
+        bool isFinal;
+    };
+    BurstImageData* imageData = new BurstImageData{copyBuffer, size, isFinal};
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_burstEnv, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段(空操作)
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            BurstImageData* imageData = static_cast<BurstImageData*>(data);
+
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            void* outputData = nullptr;
+            napi_value arrayBuffer = nullptr;
+
+            napi_create_arraybuffer(envLocal, imageData->size, &outputData, &arrayBuffer);
+            std::memcpy(outputData, imageData->buffer, imageData->size);
+
+            // 创建 isFinal 参数
+            napi_value isFinalValue;
+            napi_get_boolean(envLocal, imageData->isFinal, &isFinalValue);
+
+            napi_value argv[2] = {arrayBuffer, isFinalValue};
+
+            napi_get_reference_value(envLocal, g_burstImageCallbackRef, &callback);
+            if (callback) {
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 2, argv, &retVal);
+            } else {
+                OH_LOG_ERROR(LOG_APP, "onBurstImageCallback callback is null");
+            }
+
+            // 清理内存
+            free(imageData->buffer);
+            delete imageData;
+        },
+        imageData, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for burst image callback");
+        free(copyBuffer);
+        delete imageData;
+        return;
+    }
+
+    napi_queue_async_work_with_qos(g_burstEnv, work, napi_qos_user_initiated);
+}
+typedef struct {
+    uint16_t* data; // RGB 数据 格式：R G B R G B  ......
+    int width;
+    int height;
+    size_t size;
+    int error;
+} Rgb16Result;
+// 连拍进度回调 (内部使用)
+static void onBurstProgressCallback(const exposhot::BurstProgress& progress) {
+    if (!g_burstProgressCallbackRef || !g_burstEnv) {
+        return;
+    }
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_burstEnv, "onBurstProgress", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    // 复制进度数据
+    exposhot::BurstProgress* progressCopy = new exposhot::BurstProgress(progress);
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_burstEnv, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段(空操作)
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            exposhot::BurstProgress* progress = static_cast<exposhot::BurstProgress*>(data);
+
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            napi_get_reference_value(envLocal, g_burstProgressCallbackRef, &callback);
+            if (callback) {
+                // 创建进度对象
+                napi_value progressObj;
+                napi_create_object(envLocal, &progressObj);
+
+                // 设置属性
+                napi_value stateValue;
+                napi_create_int32(envLocal, static_cast<int32_t>(progress->state), &stateValue);
+                napi_set_named_property(envLocal, progressObj, "state", stateValue);
+
+                napi_value capturedFramesValue;
+                napi_create_int32(envLocal, progress->capturedFrames, &capturedFramesValue);
+                napi_set_named_property(envLocal, progressObj, "capturedFrames", capturedFramesValue);
+
+                napi_value processedFramesValue;
+                napi_create_int32(envLocal, progress->processedFrames, &processedFramesValue);
+                napi_set_named_property(envLocal, progressObj, "processedFrames", processedFramesValue);
+
+                napi_value totalFramesValue;
+                napi_create_int32(envLocal, progress->totalFrames, &totalFramesValue);
+                napi_set_named_property(envLocal, progressObj, "totalFrames", totalFramesValue);
+
+                napi_value messageValue;
+                napi_create_string_utf8(envLocal, progress->message.c_str(), progress->message.length(), &messageValue);
+                napi_set_named_property(envLocal, progressObj, "message", messageValue);
+
+                // 调用回调
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 1, &progressObj, &retVal);
+            }
+
+            // 清理
+            delete progress;
+        },
+        progressCopy, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for burst progress callback");
+        delete progressCopy;
+        return;
+    }
+
+    napi_queue_async_work_with_qos(g_burstEnv, work, napi_qos_user_initiated);
+}
+
+// 开始连拍
+static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    // 解析配置
+    int32_t frameCount = 5;
+    int32_t exposureMs = 10000;
+    bool realtimePreview = true;
+
+    // 从配置对象中读取
+    if (argc >= 1 && args[0] != nullptr) {
+        napi_value frameCountValue;
+        napi_get_named_property(env, args[0], "frameCount", &frameCountValue);
+        napi_get_value_int32(env, frameCountValue, &frameCount);
+
+        napi_value exposureMsValue;
+        napi_get_named_property(env, args[0], "exposureMs", &exposureMsValue);
+        napi_get_value_int32(env, exposureMsValue, &exposureMs);
+
+        napi_value realtimePreviewValue;
+        napi_get_named_property(env, args[0], "realtimePreview", &realtimePreviewValue);
+        napi_get_value_bool(env, realtimePreviewValue, &realtimePreview);
+    }
+
+    // 保存进度回调引用
+    if (argc >= 2 && args[1] != nullptr) {
+        std::lock_guard<std::mutex> lock(g_burstMutex);
+        if (g_burstProgressCallbackRef) {
+            napi_delete_reference(g_burstEnv, g_burstProgressCallbackRef);
+            g_burstProgressCallbackRef = nullptr;
+        }
+        g_burstEnv = env;
+        napi_create_reference(env, args[1], 1, &g_burstProgressCallbackRef);
+    }
+
+    // 保存图像回调引用
+    if (argc >= 3 && args[2] != nullptr) {
+        std::lock_guard<std::mutex> lock(g_burstMutex);
+        if (g_burstImageCallbackRef) {
+            napi_delete_reference(g_burstEnv, g_burstImageCallbackRef);
+            g_burstImageCallbackRef = nullptr;
+        }
+        g_burstEnv = env;
+        napi_create_reference(env, args[2], 1, &g_burstImageCallbackRef);
+    }
+
+    // 设置回调
+    exposhot::BurstCapture::getInstance().setProgressCallback(onBurstProgressCallback);
+    exposhot::BurstCapture::getInstance().setImageCallback(onBurstImageCallback);
+
+    // 初始化并启动连拍
+    if (!exposhot::BurstCapture::getInstance().init()) {
+        OH_LOG_ERROR(LOG_APP, "Failed to init BurstCapture");
+    }
+
+    exposhot::BurstConfig config;
+    config.frameCount = frameCount;
+    config.exposureMs = exposureMs;
+    config.realtimePreview = realtimePreview;
+
+    bool result = exposhot::BurstCapture::getInstance().startBurst(config);
+
+    napi_value napiResult;
+    napi_get_boolean(env, result, &napiResult);
+    return napiResult;
+}
+
+// 取消连拍
+static napi_value CancelBurstCapture(napi_env env, napi_callback_info info) {
+    exposhot::BurstCapture::getInstance().cancelBurst();
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+// 获取连拍状态
+static napi_value GetBurstState(napi_env env, napi_callback_info info) {
+    int32_t state = static_cast<int32_t>(exposhot::BurstCapture::getInstance().getState());
+
+    napi_value result;
+    napi_create_int32(env, state, &result);
+    return result;
+}
+
+// 设置连拍图像尺寸
+static napi_value SetBurstImageSize(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    int32_t width = 4032;
+    int32_t height = 3024;
+
+    if (argc >= 2) {
+        napi_get_value_int32(env, args[0], &width);
+        napi_get_value_int32(env, args[1], &height);
+    }
+
+    exposhot::BurstCapture::getInstance().setImageSize(width, height);
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -710,6 +980,11 @@ static napi_value Init(napi_env env, napi_value exports) {
         // 状态订阅
         {"subscribeState", nullptr, SubscribeState, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"unsubscribeState", nullptr, UnsubscribeState, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // 连拍相关
+        {"startBurstCapture", nullptr, StartBurstCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelBurstCapture", nullptr, CancelBurstCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getBurstState", nullptr, GetBurstState, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setBurstImageSize", nullptr, SetBurstImageSize, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
 
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

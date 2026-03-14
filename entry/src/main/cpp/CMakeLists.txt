@@ -9,8 +9,12 @@ include_directories(
 )
 
 add_library(expocamera SHARED
+    napi_expo_camera.cpp
     camera/expo_camera.cpp
-    camera/napi_expo_camera.cpp
+    camera/task_queue.cpp
+    camera/image_processor.cpp
+    camera/burst_capture.cpp
+    camera/file_saver.cpp
 )
 
 target_link_libraries(expocamera PUBLIC

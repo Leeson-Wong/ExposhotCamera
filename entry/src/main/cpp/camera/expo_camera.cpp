@@ -1,5 +1,7 @@
 #include "expo_camera.h"
+#include "burst_capture.h"
 #include "hilog/log.h"
+#include <cstdint>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -396,13 +398,14 @@ Camera_ErrorCode ExpoCamera::takePhoto() {
     }
 
     // 触发拍照（回调通过 setPhotoCallback 提前注册）
-    Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput_);
-    if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to capture: %{public}d", err);
-        return err;
-    }
+    // TODO: 暂时注释掉实际拍照，测试流程编排
+    // Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput_);
+    // if (err != CAMERA_OK) {
+    //     OH_LOG_ERROR(LOG_APP, "Failed to capture: %{public}d", err);
+    //     return err;
+    // }
 
-    OH_LOG_INFO(LOG_APP, "Photo capture triggered");
+    OH_LOG_INFO(LOG_APP, "Photo capture triggered (disabled for testing)");
     return CAMERA_OK;
 }
 
@@ -518,12 +521,22 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
     }
 
     // 复制数据并调用回调
+    // 原始 buffer 直接传递，解码逻辑由接收方（BurstCapture 或 photoCallback）处理
     if (self.photoCallback_) {
         void* bufferCopy = malloc(nativeBufferSize);
         if (bufferCopy) {
             std::memcpy(bufferCopy, virAddr, nativeBufferSize);
-            self.photoCallback_(bufferCopy, nativeBufferSize);
-            free(bufferCopy);
+
+            // 检查是否是连拍模式
+            if (exposhot::BurstCapture::getInstance().isBurstActive()) {
+                // 连拍模式: 通知 BurstCapture (由 BurstCapture 负责解码和释放)
+                // 同时传递图像尺寸信息
+                exposhot::BurstCapture::getInstance().onPhotoCaptured(
+                    bufferCopy, nativeBufferSize, size.width, size.height);
+            } else {
+                // 普通模式: 调用 photoCallback_ (由回调调用者负责解码和释放)
+                self.photoCallback_(bufferCopy, nativeBufferSize);
+            }
         }
     } else {
         OH_LOG_WARN(LOG_APP, "No photo callback set");

@@ -229,3 +229,81 @@ export const subscribeState: (callback: StateChangedCallback) => number;
  * @returns 0 成功，其他值表示错误码
  */
 export const unsubscribeState: () => number;
+
+// ==================== 连拍堆叠 ====================
+
+/**
+ * 连拍状态枚举
+ */
+export const enum BurstState {
+    IDLE = 0,
+    CAPTURING = 1,
+    PROCESSING = 2,
+    COMPLETED = 3,
+    ERROR = 4,
+    CANCELLED = 5,
+}
+
+/**
+ * 连拍配置
+ */
+export interface BurstConfig {
+    frameCount: number;
+    exposureMs: number;
+    realtimePreview: boolean;
+}
+
+/**
+ * 连拍进度
+ */
+export interface BurstProgress {
+    state: BurstState;
+    capturedFrames: number;
+    processedFrames: number;
+    totalFrames: number;
+    message: string;
+}
+
+/**
+ * 连拍进度回调
+ * @param progress 进度信息
+ */
+export type BurstProgressCallback = (progress: BurstProgress) => void;
+
+/**
+ * 连拍图像回调
+ * @param buffer 图像数据
+ * @param isFinal 是否是最终结果
+ */
+export type BurstImageCallback = (buffer: ArrayBuffer, isFinal: boolean) => void;
+
+/**
+ * 开始连拍
+ * @param config 连拍配置
+ * @param progressCallback 进度回调
+ * @param imageCallback 图像回调
+ * @returns 是否成功启动
+ */
+export const startBurstCapture: (
+    config: BurstConfig,
+    progressCallback: BurstProgressCallback,
+    imageCallback: BurstImageCallback
+) => boolean;
+
+/**
+ * 取消连拍
+ */
+export const cancelBurstCapture: () => void;
+
+/**
+ * 获取连拍状态
+ * @returns 当前连拍状态
+ */
+export const getBurstState: () => BurstState;
+
+/**
+ * 设置连拍图像尺寸
+ * @param width 图像宽度
+ * @param height 图像高度
+ */
+export const setBurstImageSize: (width: number, height: number) => void;
