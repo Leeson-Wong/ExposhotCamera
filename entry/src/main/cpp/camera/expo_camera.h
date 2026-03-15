@@ -42,9 +42,12 @@ public:
     Camera_ErrorCode stopPreview();
 
     // 拍照
-    using PhotoCallback = std::function<void(void* buffer, size_t size)>;
-    Camera_ErrorCode takePhoto();  // 只触发拍照动作，不接收参数
+    using PhotoCallback = std::function<void(const std::string& sessionId, void* buffer, size_t size)>;
+    std::string takePhoto();  // 触发拍照，返回 sessionId
     void setPhotoCallback(const PhotoCallback& callback) { photoCallback_ = callback; }
+
+    // 获取当前拍照 sessionId（用于回调关联）
+    std::string getCurrentSessionId() const { return currentSessionId_; }
 
     // 相机参数
     Camera_ErrorCode setZoomRatio(float ratio);
@@ -140,6 +143,9 @@ private:
 
     // 状态订阅
     StateCallback stateCallback_;
+
+    // 当前拍照 sessionId
+    std::string currentSessionId_;
 };
 
 #endif // EXPO_CAMERA_H

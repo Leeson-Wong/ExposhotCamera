@@ -68,8 +68,12 @@ struct TestBurstCapture {
     return slotId;
   }
 
-  processPhotoBufferWrapper = (buffer: ArrayBuffer) => {
-    this.processPhotoBuffer(buffer);
+  processPhotoBufferWrapper = (data: nativeCamera.ImageData) => {
+    if (!data.buffer) {
+      // LOG 未拿到图像数据
+      return
+    }
+    this.processPhotoBuffer(data.buffer);
   }
 
   async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {

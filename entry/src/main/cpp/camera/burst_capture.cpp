@@ -4,6 +4,9 @@
 
 #include <thread>
 #include <chrono>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -11,6 +14,22 @@
 #define LOG_TAG "BurstCapture"
 
 namespace exposhot {
+
+// 生成唯一的 sessionId
+static std::string generateSessionId() {
+    // 使用时间戳 + 随机数生成唯一 ID
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 9999);
+
+    std::ostringstream oss;
+    oss << "session_" << ms << "_" << std::setw(4) << std::setfill('0') << dis(gen);
+    return oss.str();
+}
 
 BurstCapture& BurstCapture::getInstance() {
     static BurstCapture instance;
@@ -61,16 +80,20 @@ void BurstCapture::setImageCallback(BurstImageCallback callback) {
     imageCallback_ = callback;
 }
 
-bool BurstCapture::startBurst(const BurstConfig& config) {
+std::string BurstCapture::startBurst(const BurstConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (state_.load() != BurstState::IDLE) {
         OH_LOG_WARN(LOG_APP, "Burst already in progress, state: %{public}d",
                     static_cast<int>(state_.load()));
-        return false;
+        return "";
     }
 
+    // 生成 sessionId
+    std::string sessionId = generateSessionId();
+
     config_ = config;
+    config_.sessionId = sessionId;
     captureCount_.store(0);
     processCount_.store(0);
 
@@ -78,7 +101,7 @@ bool BurstCapture::startBurst(const BurstConfig& config) {
     processor_->reset();
 
     // 设置处理器进度回调
-    processor_->setProgressCallback([this](int32_t current, int32_t total,
+    processor_->setProgressCallback([this, sessionId](int32_t current, int32_t total,
                                                   void* buffer, size_t size) {
         if (config_.realtimePreview && imageCallback_ && buffer) {
             // 复制 buffer（回调后处理器可能释放）
@@ -96,8 +119,9 @@ bool BurstCapture::startBurst(const BurstConfig& config) {
                     state.c_str(), message.c_str());
     });
 
-    // 更新状态
+    // 更新状态和 sessionId
     state_.store(BurstState::CAPTURING);
+    progress_.sessionId = sessionId;
     progress_.state = BurstState::CAPTURING;
     progress_.totalFrames = config.frameCount;
     progress_.capturedFrames = 0;
@@ -105,8 +129,8 @@ bool BurstCapture::startBurst(const BurstConfig& config) {
     progress_.message = "Starting burst capture";
     notifyProgress();
 
-    OH_LOG_INFO(LOG_APP, "Burst started: %{public}d frames, exposure: %{public}dms",
-                config.frameCount, config.exposureMs);
+    OH_LOG_INFO(LOG_APP, "Burst started: sessionId=%{public}s, %{public}d frames, exposure: %{public}dms",
+                sessionId.c_str(), config.frameCount, config.exposureMs);
 
     // 启动拍照循环(在独立线程中)
     std::thread captureThread([this]() {
@@ -114,7 +138,7 @@ bool BurstCapture::startBurst(const BurstConfig& config) {
     });
     captureThread.detach();
 
-    return true;
+    return sessionId;
 }
 
 void BurstCapture::cancelBurst() {
@@ -219,11 +243,11 @@ void BurstCapture::startCaptureLoop() {
 }
 
 void BurstCapture::captureNextFrame() {
-    Camera_ErrorCode err = ExpoCamera::getInstance().takePhoto();
-    if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to capture photo: %{public}d", err);
+    std::string sessionId = ExpoCamera::getInstance().takePhoto();
+    if (sessionId.empty()) {
+        OH_LOG_ERROR(LOG_APP, "Failed to capture photo: empty sessionId");
     } else {
-        OH_LOG_INFO(LOG_APP, "Photo capture triggered");
+        OH_LOG_INFO(LOG_APP, "Photo capture triggered, sessionId: %{public}s", sessionId.c_str());
     }
 }
 
@@ -304,7 +328,7 @@ void BurstCapture::notifyProgress() {
 
 void BurstCapture::notifyImage(void* buffer, size_t size, bool isFinal) {
     if (imageCallback_) {
-        imageCallback_(buffer, size, isFinal);
+        imageCallback_(progress_.sessionId, buffer, size, isFinal);
     }
 }
 

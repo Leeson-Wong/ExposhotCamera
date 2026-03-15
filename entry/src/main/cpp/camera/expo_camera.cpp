@@ -2,11 +2,30 @@
 #include "burst_capture.h"
 #include "hilog/log.h"
 #include <cstdint>
+#include <random>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x3200
 #define LOG_TAG "ExpoCamera"
+
+// 生成唯一的 sessionId
+static std::string generateSessionId() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 9999);
+
+    std::ostringstream oss;
+    oss << "photo_" << ms << "_" << std::setw(4) << std::setfill('0') << dis(gen);
+    return oss.str();
+}
 
 ExpoCamera& ExpoCamera::getInstance() {
     static ExpoCamera instance;
@@ -378,35 +397,38 @@ Camera_ErrorCode ExpoCamera::stopPreview() {
     return CAMERA_OK;
 }
 
-Camera_ErrorCode ExpoCamera::takePhoto() {
+std::string ExpoCamera::takePhoto() {
 //    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
         OH_LOG_ERROR(LOG_APP, "ExpoCamera not initialized");
-        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
+        return "";
     }
 
     if (!previewing_) {
         OH_LOG_ERROR(LOG_APP, "Preview not running");
-        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
+        return "";
     }
 
     if (!photoOutput_ || !photoOutputAdded_) {
         OH_LOG_ERROR(LOG_APP, "PhotoOutput not ready or not added to session (photoOutput=%{public}p, added=%{public}d)",
                      photoOutput_, photoOutputAdded_);
-        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
+        return "";
     }
+
+    // 生成新的 sessionId
+    currentSessionId_ = generateSessionId();
 
     // 触发拍照（回调通过 setPhotoCallback 提前注册）
     // TODO: 暂时注释掉实际拍照，测试流程编排
     // Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput_);
     // if (err != CAMERA_OK) {
     //     OH_LOG_ERROR(LOG_APP, "Failed to capture: %{public}d", err);
-    //     return err;
+    //     return "";
     // }
 
-    OH_LOG_INFO(LOG_APP, "Photo capture triggered (disabled for testing)");
-    return CAMERA_OK;
+    OH_LOG_INFO(LOG_APP, "Photo capture triggered (disabled for testing), sessionId=%{public}s", currentSessionId_.c_str());
+    return currentSessionId_;
 }
 
 // 拍照回调（静态方法）
@@ -429,7 +451,7 @@ void ExpoCamera::onFrameEnd(Camera_PhotoOutput* photoOutput, int32_t frameCount)
 
     // 通知拍照完成（照片数据获取由你自行实现）
     // 暂时传入 nullptr 和 0
-    self.photoCallback_(nullptr, 0);
+    self.photoCallback_(self.currentSessionId_, nullptr, 0);
 }
 
 void ExpoCamera::onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode errorCode) {
@@ -535,7 +557,7 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
                     bufferCopy, nativeBufferSize, size.width, size.height);
             } else {
                 // 普通模式: 调用 photoCallback_ (由回调调用者负责解码和释放)
-                self.photoCallback_(bufferCopy, nativeBufferSize);
+                self.photoCallback_(self.currentSessionId_, bufferCopy, nativeBufferSize);
             }
         }
     } else {

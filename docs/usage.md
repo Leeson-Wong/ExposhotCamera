@@ -102,7 +102,6 @@ your-app/
 | `startPreview(surfaceId)` | 启动预览 | `0` 成功 |
 | `stopPreview()` | 停止预览 | `0` 成功 |
 | `switchSurface(surfaceId)` | 切换预览 Surface | `0` 成功 |
-| `takePhoto(callback)` | 拍照 | `0` 成功 |
 | `isPhotoOutputReady()` | 检查拍照就绪 | `boolean` |
 
 ### 相机参数
@@ -135,18 +134,87 @@ your-app/
 
 ---
 
+## 拍照模式
+
+SDK 提供两种拍照模式，适用于不同场景：
+
+| 模式 | API | 适用场景 | 流程 |
+|------|-----|----------|------|
+| **单次拍照** | `takePhoto()` | 普通拍照 | 拍完直接返回图片，无后处理 |
+| **连拍堆叠** | `startBurstCapture()` | 天文摄影 | 多帧拍摄 → 堆叠处理 → 返回合成图 |
+
+### 单次拍照
+
+简单流程，拍完直接返回图片数据：
+
+```
+takePhoto() → capture_start → capture_end + 图片数据
+```
+
+| 接口 | 说明 |
+|------|------|
+| `takePhoto()` | 触发拍照 |
+| `registerPhotoEventCallback(callback)` | 注册拍照事件回调 |
+| `registerImageDataCallback(callback)` | 注册图像数据回调 |
+
+### 连拍堆叠
+
+完整流程，包含拍摄和处理阶段：
+
+```
+startBurstCapture()
+    │
+    ▼ (循环拍摄 N 帧)
+capture_start → capture_end (每帧)
+    │
+    ▼ (全部拍完后处理)
+process_start → process_progress → process_end
+    │
+    ▼
+image_ready (堆叠合成后的最终图片)
+```
+
+| 接口 | 说明 |
+|------|------|
+| `startBurstCapture(config, progressCallback, imageCallback)` | 开始连拍 |
+| `cancelBurstCapture()` | 取消连拍 |
+| `getBurstState()` | 获取连拍状态 |
+| `setBurstImageSize(width, height)` | 设置图像尺寸 |
+
+### 文件保存
+
+| 接口 | 说明 |
+|------|------|
+| `saveImageToFile(buffer, filename?)` | 保存图像到文件 |
+| `getImageSaveDir()` | 获取保存目录 |
+
+---
+
 ## 使用示例
 
-### 基础用法
+### 单次拍照
+
+简单流程，拍完直接获取图片：
 
 ```typescript
 import nativeCamera from 'libexpocamera.so';
 
 @Entry
 @Component
-struct CameraPage {
+struct PhotoPage {
   private xComponentController: XComponentController = new XComponentController();
-  private slotId: string = '';
+
+  aboutToAppear() {
+    // 注册图像数据回调
+    nativeCamera.registerImageDataCallback((data) => {
+      console.log(`拍照成功: ${data.width}x${data.height}`);
+      if (data.isFinal) {
+        // 保存或显示图片
+        const path = nativeCamera.saveImageToFile(data.buffer!);
+        console.log(`已保存: ${path}`);
+      }
+    });
+  }
 
   build() {
     Column() {
@@ -157,48 +225,87 @@ struct CameraPage {
         controller: this.xComponentController
       })
       .onLoad(() => {
-        this.initCamera();
+        nativeCamera.initCamera();
+        const surfaceId = this.xComponentController.getXComponentSurfaceId();
+        nativeCamera.startPreview(surfaceId);
       })
       .width('100%')
       .height('100%')
 
       Button('拍照')
-        .onClick(() => this.takePhoto())
+        .onClick(() => {
+          if (nativeCamera.isPhotoOutputReady()) {
+            nativeCamera.takePhoto();
+          }
+        })
+    }
+  }
+}
+```
+
+### 连拍堆叠（天文摄影）
+
+多帧拍摄 + 堆叠合成：
+
+```typescript
+import nativeCamera, { BurstState } from 'libexpocamera.so';
+
+@Entry
+@Component
+struct BurstCapturePage {
+  @State progress: string = '';
+  @State isCapturing: boolean = false;
+
+  build() {
+    Column() {
+      // ... XComponent 预览 ...
+
+      Text(this.progress)
+
+      Button(this.isCapturing ? '取消' : '开始连拍')
+        .onClick(() => {
+          if (this.isCapturing) {
+            nativeCamera.cancelBurstCapture();
+          } else {
+            this.startBurst();
+          }
+        })
     }
   }
 
-  async initCamera() {
-    // 1. 初始化相机
-    nativeCamera.initCamera();
+  startBurst() {
+    this.isCapturing = true;
+    this.progress = '准备拍摄...';
 
-    // 2. 获取 Surface ID
-    const surfaceId = this.xComponentController.getXComponentSurfaceId();
+    const success = nativeCamera.startBurstCapture(
+      {
+        frameCount: 10,       // 拍 10 帧
+        exposureMs: 10000,    // 每帧 10 秒
+        realtimePreview: true // 实时预览中间结果
+      },
+      // 进度回调
+      (progress) => {
+        this.progress = `状态: ${progress.state}, ` +
+          `已拍: ${progress.capturedFrames}/${progress.totalFrames}, ` +
+          `已处理: ${progress.processedFrames}`;
+      },
+      // 图像回调
+      (buffer, isFinal) => {
+        if (isFinal) {
+          console.log('最终图像已生成');
+          const path = nativeCamera.saveImageToFile(buffer, 'burst_final.jpg');
+          console.log(`已保存: ${path}`);
+          this.isCapturing = false;
+        } else {
+          console.log('中间预览图像');
+        }
+      }
+    );
 
-    // 3. 启动预览
-    nativeCamera.startPreview(surfaceId);
-
-    // 4. 注册观察者（可选）
-    this.slotId = nativeCamera.registerObserver(surfaceId, (activeSlotId, activeSurfaceId) => {
-      console.log(`预览流切换到: ${activeSlotId}`);
-    });
-  }
-
-  takePhoto() {
-    if (!nativeCamera.isPhotoOutputReady()) {
-      console.warn('拍照未就绪');
-      return;
+    if (!success) {
+      this.progress = '启动失败';
+      this.isCapturing = false;
     }
-
-    nativeCamera.takePhoto((arrayBuffer: ArrayBuffer) => {
-      console.log(`拍照成功，大小: ${arrayBuffer.byteLength}`);
-      // 处理照片数据...
-    });
-  }
-
-  aboutToDisappear() {
-    nativeCamera.unregisterObserver(this.slotId);
-    nativeCamera.stopPreview();
-    nativeCamera.releaseCamera();
   }
 }
 ```

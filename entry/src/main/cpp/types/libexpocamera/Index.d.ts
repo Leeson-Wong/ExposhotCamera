@@ -20,6 +20,97 @@ export const enum FocusMode {
     LOCKED = 3,
 }
 
+// ==================== 事件系统 ====================
+
+/**
+ * 拍照事件类型
+ */
+export const enum PhotoEventType {
+    CAPTURE_START = 0,      // 拍照命令已发送
+    CAPTURE_END = 1,        // 拍照成功，原始数据已获取
+    CAPTURE_FAILED = 2,     // 拍照失败
+}
+
+/**
+ * 拍照事件
+ */
+export interface PhotoEvent {
+    type: PhotoEventType;
+    sessionId: string;      // 会话 ID，关联同一次拍照的所有事件
+    frameIndex?: number;    // 连拍帧索引 (0-based)
+    message?: string;
+}
+
+/**
+ * 处理事件类型
+ */
+export const enum ProcessEventType {
+    PROCESS_START = 0,      // 开始处理
+    PROCESS_PROGRESS = 1,   // 处理进度更新
+    PROCESS_END = 2,        // 处理完成
+    PROCESS_FAILED = 3,     // 处理失败
+}
+
+/**
+ * 处理事件
+ */
+export interface ProcessEvent {
+    type: ProcessEventType;
+    sessionId: string;          // 会话 ID，关联同一次拍照的所有事件
+    progress?: number;          // 进度百分比 (0-100)
+    currentFrame?: number;      // 当前帧
+    totalFrames?: number;       // 总帧数
+    message?: string;
+}
+
+/**
+ * 图像数据（数据就绪回调）
+ */
+export interface ImageData {
+    sessionId: string;          // 会话 ID，关联同一次拍照的所有事件
+    buffer?: ArrayBuffer;       // 图像数据（可选，与 filePath 二选一）
+    filePath?: string;          // 文件路径（NDK 落盘后）
+    width: number;
+    height: number;
+    frameIndex?: number;        // 连拍帧索引
+    isFinal: boolean;           // 是否最终结果
+}
+
+/**
+ * 拍照事件回调
+ */
+export type PhotoEventCallback = (event: PhotoEvent) => void;
+
+/**
+ * 处理事件回调
+ */
+export type ProcessEventCallback = (event: ProcessEvent) => void;
+
+/**
+ * 图像数据回调
+ */
+export type ImageDataCallback = (data: ImageData) => void;
+
+/**
+ * 注册拍照事件回调
+ * @param callback 拍照事件回调
+ */
+export const registerPhotoEventCallback: (callback: PhotoEventCallback) => void;
+
+/**
+ * 注册处理事件回调
+ * @param callback 处理事件回调
+ */
+export const registerProcessEventCallback: (callback: ProcessEventCallback) => void;
+
+/**
+ * 注册图像数据回调
+ * @param callback 图像数据回调
+ */
+export const registerImageDataCallback: (callback: ImageDataCallback) => void;
+
+// ==================== 相机控制 ====================
+
 /**
  * 初始化相机
  * @returns 0 成功，其他值表示错误码
@@ -54,30 +145,20 @@ export const startPreview: (surfaceId: string) => number;
 export const stopPreview: () => number;
 
 /**
- * 图像数据回调函数类型
- * @param arrayBuffer 照片数据的 ArrayBuffer
+ * 拍照
+ * 拍照事件通过 registerPhotoEventCallback 接收
+ * 图像数据通过 registerImageDataCallback 接收
+ * @returns sessionId 用于关联同一次拍照的所有事件
  */
-export type ImageDataCallback = (arrayBuffer: ArrayBuffer) => void;
-
-/**
- * 注册图像数据回调函数
- * 拍照完成后会通过此回调返回图像数据
- * @param callback 图像数据回调函数
- */
-export const registerImageDataCallback: (callback: ImageDataCallback) => void;
-
-/**
- * 拍照（只触发拍照动作，不接收参数）
- * 拍照完成后，图像数据会通过 registerImageDataCallback 注册的回调返回
- * @returns 0 成功，其他值表示错误码
- */
-export const takePhoto: () => number;
+export const takePhoto: () => string;
 
 /**
  * 检查拍照输出是否就绪
  * @returns true 就绪，false 未就绪
  */
 export const isPhotoOutputReady: () => boolean;
+
+// ==================== 缩放控制 ====================
 
 /**
  * 设置缩放比例
@@ -103,6 +184,8 @@ export const getZoomRatioRange: () => ZoomRange;
  * @returns true 支持，false 不支持
  */
 export const isZoomSupported: () => boolean;
+
+// ==================== 对焦控制 ====================
 
 /**
  * 设置对焦模式
@@ -257,6 +340,7 @@ export interface BurstConfig {
  * 连拍进度
  */
 export interface BurstProgress {
+    sessionId: string;          // 会话 ID，关联同一次连拍的所有事件
     state: BurstState;
     capturedFrames: number;
     processedFrames: number;
@@ -282,13 +366,13 @@ export type BurstImageCallback = (buffer: ArrayBuffer, isFinal: boolean) => void
  * @param config 连拍配置
  * @param progressCallback 进度回调
  * @param imageCallback 图像回调
- * @returns 是否成功启动
+ * @returns sessionId 用于关联同一次连拍的所有事件，空字符串表示启动失败
  */
 export const startBurstCapture: (
     config: BurstConfig,
     progressCallback: BurstProgressCallback,
     imageCallback: BurstImageCallback
-) => boolean;
+) => string;
 
 /**
  * 取消连拍
@@ -307,3 +391,19 @@ export const getBurstState: () => BurstState;
  * @param height 图像高度
  */
 export const setBurstImageSize: (width: number, height: number) => void;
+
+// ==================== 文件保存 ====================
+
+/**
+ * 保存图像到文件
+ * @param buffer 图像数据
+ * @param filename 文件名（可选，自动生成时间戳文件名）
+ * @returns 保存的文件路径
+ */
+export const saveImageToFile: (buffer: ArrayBuffer, filename?: string) => string;
+
+/**
+ * 获取图片保存目录
+ * @returns 保存目录路径
+ */
+export const getImageSaveDir: () => string;

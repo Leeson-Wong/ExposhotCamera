@@ -25,10 +25,12 @@ struct BurstConfig {
     int32_t frameCount = 5;         // 拍摄帧数
     int32_t exposureMs = 10000;     // 每帧曝光时间(毫秒)
     bool realtimePreview = true;    // 是否实时返回累积结果
+    std::string sessionId;          // 会话 ID
 };
 
 // 连拍进度信息
 struct BurstProgress {
+    std::string sessionId;          // 会话 ID
     BurstState state = BurstState::IDLE;
     int32_t capturedFrames = 0;     // 已拍摄帧数
     int32_t processedFrames = 0;    // 已处理帧数
@@ -40,10 +42,11 @@ struct BurstProgress {
 using BurstProgressCallback = std::function<void(const BurstProgress& progress)>;
 
 // 图像数据回调(回调到 UI 线程)
+// sessionId: 会话 ID
 // buffer: JPEG 图像数据(调用者负责 free)
 // size: 数据大小
 // isFinal: 是否是最终结果
-using BurstImageCallback = std::function<void(void* buffer, size_t size, bool isFinal)>;
+using BurstImageCallback = std::function<void(const std::string& sessionId, void* buffer, size_t size, bool isFinal)>;
 
 // 连拍管理器(单例)
 class BurstCapture {
@@ -60,8 +63,8 @@ public:
 
     // 开始连拍
     // config: 连拍配置
-    // 返回: 是否成功启动
-    bool startBurst(const BurstConfig& config);
+    // 返回: sessionId，空字符串表示启动失败
+    std::string startBurst(const BurstConfig& config);
 
     // 取消连拍
     void cancelBurst();

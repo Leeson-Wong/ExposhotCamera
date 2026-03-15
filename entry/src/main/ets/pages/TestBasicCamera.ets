@@ -12,7 +12,7 @@ enum FocusMode {
   CONTINUOUS_AUTO = 1,
   AUTO = 2,
   LOCKED = 3,
-};
+}
 
 @Entry
 @Component
@@ -21,28 +21,32 @@ struct TestBasicCamera {
   @State photoReady: boolean = false;
   @State slotId: string = '';
   @State hasPreview: boolean = false;
-
+  @State capturedImage: PixelMap | undefined = undefined;
   // 缩放控制
   @State zoomRatio: number = 1.0;
   @State zoomMin: number = 1.0;
   @State zoomMax: number = 1.0;
   @State zoomSupported: boolean = false;
-
   // 对焦控制
   @State focusMode: number = FocusMode.CONTINUOUS_AUTO;
-
-  @State capturedImage: PixelMap | undefined = undefined;
-
   private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
-    nativeCamera.registerImageDataCallback(this.processPhotoBufferWrapper);
+    // 注册图像数据回调
+    nativeCamera.registerImageDataCallback((data) => {
+      hilog.info(DOMAIN, TAG, 'Image data received: sessionId=%{public}s, %{public}dx%{public}d, isFinal=%{public}s',
+        data.sessionId || '', data.width, data.height, data.isFinal?.toString() || 'false');
+      this.cameraStatus = '拍照成功，正在处理...';
+      this.processImageData(data);
+    });
 
+    // 订阅相机状态
     nativeCamera.subscribeState((state: string, message: string) => {
       hilog.info(DOMAIN, TAG, 'Camera state: %{public}s, message: %{public}s', state, message);
       this.cameraStatus = `${state}: ${message}`;
     });
 
+    // 初始化相机
     const result = nativeCamera.initCamera();
     hilog.info(DOMAIN, TAG, 'initCamera result: %{public}d', result);
     if (result === 0) {
@@ -90,18 +94,18 @@ struct TestBasicCamera {
     this.focusMode = nativeCamera.getFocusMode();
   }
 
-  processPhotoBufferWrapper = (buffer: ArrayBuffer) => {
-    this.processPhotoBuffer(buffer);
-  }
-
-  async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
+  async processImageData(data: nativeCamera.ImageData): Promise<void> {
+    if (!data.buffer) {
+      hilog.warn(DOMAIN, TAG, 'No image buffer in data');
+      return;
+    }
     try {
-      const imageSource = image.createImageSource(buffer);
+      const imageSource = image.createImageSource(data.buffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
-      this.cameraStatus = '拍照完成';
+      hilog.info(DOMAIN, TAG, 'Image processed: %{public}dx%{public}d', data.width, data.height);
     } catch (error) {
-      hilog.error(DOMAIN, TAG, 'Failed to process photo buffer: %{public}s', JSON.stringify(error));
+      hilog.error(DOMAIN, TAG, 'Failed to process image: %{public}s', JSON.stringify(error));
     }
   }
 
@@ -110,11 +114,13 @@ struct TestBasicCamera {
       this.cameraStatus = '拍照未就绪';
       return;
     }
-    const result = nativeCamera.takePhoto();
-    if (result === 0) {
+    const sessionId = nativeCamera.takePhoto();
+    if (sessionId && sessionId.length > 0) {
       this.cameraStatus = '正在拍照...';
+      hilog.info(DOMAIN, TAG, 'takePhoto sessionId: %{public}s', sessionId);
     } else {
-      this.cameraStatus = `拍照失败: ${result}`;
+      this.cameraStatus = '拍照失败: 无法获取 sessionId';
+      hilog.error(DOMAIN, TAG, 'takePhoto failed: empty sessionId');
     }
   }
 
@@ -238,7 +244,12 @@ struct TestBasicCamera {
             .textAlign(TextAlign.End)
         }
         .width('100%')
-        .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+        .padding({
+          left: 16,
+          right: 16,
+          top: 8,
+          bottom: 8
+        })
         .backgroundColor('#80000000')
       }
 
@@ -271,7 +282,12 @@ struct TestBasicCamera {
           .onClick(() => this.setFocus(FocusMode.MANUAL))
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+      .padding({
+        left: 16,
+        right: 16,
+        top: 8,
+        bottom: 8
+      })
       .backgroundColor('#80000000')
 
       // 拍照按钮
@@ -289,9 +305,6 @@ struct TestBasicCamera {
       .width('100%')
       .padding(16)
       .justifyContent(FlexAlign.Center)
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#000000')
+    }.width('100%').height('100%').backgroundColor('#000000')
   }
 }

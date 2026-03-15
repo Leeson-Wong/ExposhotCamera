@@ -137,8 +137,12 @@ struct TestFullFeatures {
     }
   }
 
-  processPhotoBufferWrapper = (buffer: ArrayBuffer) => {
-    this.processPhotoBuffer(buffer);
+  processPhotoBufferWrapper = (data: nativeCamera.ImageData) => {
+    if (!data.buffer) {
+      // LOG 未拿到图像数据
+      return
+    }
+    this.processPhotoBuffer(data.buffer);
   }
 
   async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
@@ -161,7 +165,7 @@ struct TestFullFeatures {
     const result = nativeCamera.takePhoto();
 
     hilog.info(DOMAIN, TAG, 'takePhoto result: %{public}d', result);
-    if (result === 0) {
+    if (!result) {
       this.cameraStatus = '正在拍照...';
     } else {
       this.cameraStatus = `拍照失败: ${result}`;

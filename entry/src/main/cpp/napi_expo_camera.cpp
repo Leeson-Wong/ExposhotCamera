@@ -37,15 +37,19 @@ static napi_ref g_burstImageCallbackRef = nullptr;
 static napi_env g_burstEnv = nullptr;
 static std::mutex g_burstMutex;
 
+// 当前 sessionId 存储（用于异步回调）
+static std::string g_currentSessionId;
+
 // 保存照片数据，用于回调（使用异步工作队列）
-static void onPhotoData(void* buffer, size_t size) {
+static void onPhotoData(const std::string& sessionId, void* buffer, size_t size) {
     if (!g_photoCallbackRef || !g_env || !buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Photo callback not ready or invalid buffer");
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "onPhotoData size:%{public}zu", size);
+    OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu", sessionId.c_str(), size);
     g_photoSize = size;
+    g_currentSessionId = sessionId;
 
     // 复制 buffer 数据
     void* copyBuffer = malloc(size);
@@ -75,12 +79,30 @@ static void onPhotoData(void* buffer, size_t size) {
             napi_create_arraybuffer(envLocal, bufferSize, &outputData, &arrayBuffer);
             std::memcpy(outputData, data, bufferSize);
 
-            OH_LOG_INFO(LOG_APP, "onPhotoData async callback, size: %{public}zu", g_photoSize);
+            OH_LOG_INFO(LOG_APP, "onPhotoData async callback, sessionId: %{public}s, size: %{public}zu",
+                        g_currentSessionId.c_str(), g_photoSize);
 
             napi_get_reference_value(envLocal, g_photoCallbackRef, &callback);
             if (callback) {
+                // 创建 ImageData 对象
+                napi_value imageDataObj;
+                napi_create_object(envLocal, &imageDataObj);
+
+                // 设置 sessionId
+                napi_value sessionIdValue;
+                napi_create_string_utf8(envLocal, g_currentSessionId.c_str(), g_currentSessionId.length(), &sessionIdValue);
+                napi_set_named_property(envLocal, imageDataObj, "sessionId", sessionIdValue);
+
+                // 设置 buffer
+                napi_set_named_property(envLocal, imageDataObj, "buffer", arrayBuffer);
+
+                // 设置 isFinal (单次拍照始终为 true)
+                napi_value isFinalValue;
+                napi_get_boolean(envLocal, true, &isFinalValue);
+                napi_set_named_property(envLocal, imageDataObj, "isFinal", isFinalValue);
+
                 napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &arrayBuffer, &retVal);
+                napi_call_function(envLocal, nullptr, callback, 1, &imageDataObj, &retVal);
             } else {
                 OH_LOG_ERROR(LOG_APP, "onPhotoData callback is null");
             }
@@ -466,14 +488,14 @@ static napi_value IsZoomSupported(napi_env env, napi_callback_info info) {
 }
 
 static napi_value TakePhoto(napi_env env, napi_callback_info info) {
-    // takePhoto 只作为动作触发，不接收参数
+    // takePhoto 触发拍照并返回 sessionId
     // 回调需要先通过 registerImageDataCallback 注册
 
     ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.takePhoto();
+    std::string sessionId = camera.takePhoto();
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &result);
     return result;
 }
 
@@ -691,13 +713,14 @@ static napi_value UnsubscribeState(napi_env env, napi_callback_info info) {
 // ========== 连拍相关 NAPI 方法 ==========
 
 // 连拍图像数据回调 (内部使用)
-static void onBurstImageCallback(void* buffer, size_t size, bool isFinal) {
+static void onBurstImageCallback(const std::string& sessionId, void* buffer, size_t size, bool isFinal) {
     if (!g_burstImageCallbackRef || !g_burstEnv || !buffer) {
         OH_LOG_ERROR(LOG_APP, "Burst image callback not ready");
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "onBurstImageCallback size: %{public}zu, isFinal: %{public}d", size, isFinal);
+    OH_LOG_INFO(LOG_APP, "onBurstImageCallback sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
+                sessionId.c_str(), size, isFinal);
 
     // 复制 buffer 数据
     void* copyBuffer = malloc(size);
@@ -711,13 +734,14 @@ static void onBurstImageCallback(void* buffer, size_t size, bool isFinal) {
     napi_value asyncResourceName = nullptr;
     napi_create_string_utf8(g_burstEnv, "onBurstImage", NAPI_AUTO_LENGTH, &asyncResourceName);
 
-    // 将 isFinal 作为 data 的一部分传递
+    // 将 sessionId 和 isFinal 作为 data 的一部分传递
     struct BurstImageData {
+        std::string sessionId;
         void* buffer;
         size_t size;
         bool isFinal;
     };
-    BurstImageData* imageData = new BurstImageData{copyBuffer, size, isFinal};
+    BurstImageData* imageData = new BurstImageData{sessionId, copyBuffer, size, isFinal};
 
     napi_async_work work;
     napi_status status = napi_create_async_work(
@@ -736,16 +760,28 @@ static void onBurstImageCallback(void* buffer, size_t size, bool isFinal) {
             napi_create_arraybuffer(envLocal, imageData->size, &outputData, &arrayBuffer);
             std::memcpy(outputData, imageData->buffer, imageData->size);
 
-            // 创建 isFinal 参数
+            // 创建 ImageData 对象
+            napi_value imageDataObj;
+            napi_create_object(envLocal, &imageDataObj);
+
+            // 设置 sessionId
+            napi_value sessionIdValue;
+            napi_create_string_utf8(envLocal, imageData->sessionId.c_str(),
+                                     imageData->sessionId.length(), &sessionIdValue);
+            napi_set_named_property(envLocal, imageDataObj, "sessionId", sessionIdValue);
+
+            // 设置 buffer
+            napi_set_named_property(envLocal, imageDataObj, "buffer", arrayBuffer);
+
+            // 设置 isFinal
             napi_value isFinalValue;
             napi_get_boolean(envLocal, imageData->isFinal, &isFinalValue);
-
-            napi_value argv[2] = {arrayBuffer, isFinalValue};
+            napi_set_named_property(envLocal, imageDataObj, "isFinal", isFinalValue);
 
             napi_get_reference_value(envLocal, g_burstImageCallbackRef, &callback);
             if (callback) {
                 napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 2, argv, &retVal);
+                napi_call_function(envLocal, nullptr, callback, 1, &imageDataObj, &retVal);
             } else {
                 OH_LOG_ERROR(LOG_APP, "onBurstImageCallback callback is null");
             }
@@ -822,6 +858,11 @@ static void onBurstProgressCallback(const exposhot::BurstProgress& progress) {
                 napi_value messageValue;
                 napi_create_string_utf8(envLocal, progress->message.c_str(), progress->message.length(), &messageValue);
                 napi_set_named_property(envLocal, progressObj, "message", messageValue);
+
+                // 设置 sessionId
+                napi_value sessionIdValue;
+                napi_create_string_utf8(envLocal, progress->sessionId.c_str(), progress->sessionId.length(), &sessionIdValue);
+                napi_set_named_property(envLocal, progressObj, "sessionId", sessionIdValue);
 
                 // 调用回调
                 napi_value retVal;
@@ -904,10 +945,10 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
     config.exposureMs = exposureMs;
     config.realtimePreview = realtimePreview;
 
-    bool result = exposhot::BurstCapture::getInstance().startBurst(config);
+    std::string sessionId = exposhot::BurstCapture::getInstance().startBurst(config);
 
     napi_value napiResult;
-    napi_get_boolean(env, result, &napiResult);
+    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &napiResult);
     return napiResult;
 }
 
