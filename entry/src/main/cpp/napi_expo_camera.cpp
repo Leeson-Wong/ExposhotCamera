@@ -4,6 +4,7 @@
 #include <map>
 #include "expo_camera.h"
 #include "capture_manager.h"
+#include "file_saver.h"
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -16,6 +17,8 @@ static napi_ref g_photoCallbackRef = nullptr;
 static napi_env g_env = nullptr;
 static std::mutex g_callbackMutex;
 static size_t g_photoSize = 0;  // 保存照片大小，用于异步回调
+static int32_t g_photoWidth = 0;  // 保存照片宽度
+static int32_t g_photoHeight = 0;  // 保存照片高度
 
 // 拍照错误回调存储
 static napi_ref g_photoErrorCallbackRef = nullptr;
@@ -42,18 +45,31 @@ static napi_ref g_burstImageCallbackRef = nullptr;
 static napi_env g_burstEnv = nullptr;
 static std::mutex g_burstMutex;
 
+// 拍照事件回调存储
+static napi_ref g_photoEventCallbackRef = nullptr;
+static napi_env g_photoEventEnv = nullptr;
+static std::mutex g_photoEventMutex;
+
+// 处理事件回调存储
+static napi_ref g_processEventCallbackRef = nullptr;
+static napi_env g_processEventEnv = nullptr;
+static std::mutex g_processEventMutex;
+
 // 当前 sessionId 存储（用于异步回调）
 static std::string g_currentSessionId;
 
 // 保存照片数据，用于回调（使用异步工作队列）
-static void onPhotoData(const std::string& sessionId, void* buffer, size_t size) {
+static void onPhotoData(const std::string& sessionId, void* buffer, size_t size, int32_t width, int32_t height) {
     if (!g_photoCallbackRef || !g_env || !buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Photo callback not ready or invalid buffer");
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu", sessionId.c_str(), size);
+    OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu, %{public}dx%{public}d",
+                sessionId.c_str(), size, width, height);
     g_photoSize = size;
+    g_photoWidth = width;
+    g_photoHeight = height;
     g_currentSessionId = sessionId;
 
     // 复制 buffer 数据
@@ -100,6 +116,15 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size)
 
                 // 设置 buffer
                 napi_set_named_property(envLocal, imageDataObj, "buffer", arrayBuffer);
+
+                // 设置 width 和 height
+                napi_value widthValue;
+                napi_create_int32(envLocal, g_photoWidth, &widthValue);
+                napi_set_named_property(envLocal, imageDataObj, "width", widthValue);
+
+                napi_value heightValue;
+                napi_create_int32(envLocal, g_photoHeight, &heightValue);
+                napi_set_named_property(envLocal, imageDataObj, "height", heightValue);
 
                 // 设置 isFinal (单次拍照始终为 true)
                 napi_value isFinalValue;
@@ -672,6 +697,315 @@ static napi_value RegisterPhotoErrorCallback(napi_env env, napi_callback_info in
     return result;
 }
 
+// ==================== 事件回调注册 ====================
+
+// 拍照事件回调（内部使用）
+static void onPhotoEventCallback(const exposhot::PhotoEvent& event) {
+    if (!g_photoEventCallbackRef || !g_photoEventEnv) {
+        return;
+    }
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_photoEventEnv, "onPhotoEvent", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    // 复制事件数据
+    exposhot::PhotoEvent* eventCopy = new exposhot::PhotoEvent(event);
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_photoEventEnv, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段(空操作)
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            exposhot::PhotoEvent* event = static_cast<exposhot::PhotoEvent*>(data);
+
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            napi_get_reference_value(envLocal, g_photoEventCallbackRef, &callback);
+            if (callback) {
+                // 创建事件对象
+                napi_value eventObj;
+                napi_create_object(envLocal, &eventObj);
+
+                // 设置 type
+                napi_value typeValue;
+                napi_create_int32(envLocal, static_cast<int32_t>(event->type), &typeValue);
+                napi_set_named_property(envLocal, eventObj, "type", typeValue);
+
+                // 设置 sessionId
+                napi_value sessionIdValue;
+                napi_create_string_utf8(envLocal, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
+                napi_set_named_property(envLocal, eventObj, "sessionId", sessionIdValue);
+
+                // 设置 frameIndex (可选)
+                if (event->frameIndex >= 0) {
+                    napi_value frameIndexValue;
+                    napi_create_int32(envLocal, event->frameIndex, &frameIndexValue);
+                    napi_set_named_property(envLocal, eventObj, "frameIndex", frameIndexValue);
+                }
+
+                // 设置 message (可选)
+                if (!event->message.empty()) {
+                    napi_value messageValue;
+                    napi_create_string_utf8(envLocal, event->message.c_str(), event->message.length(), &messageValue);
+                    napi_set_named_property(envLocal, eventObj, "message", messageValue);
+                }
+
+                // 调用回调
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 1, &eventObj, &retVal);
+            }
+
+            // 清理
+            delete event;
+        },
+        eventCopy, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo event callback");
+        delete eventCopy;
+        return;
+    }
+
+    napi_queue_async_work_with_qos(g_photoEventEnv, work, napi_qos_user_initiated);
+}
+
+// 注册拍照事件回调函数
+static napi_value RegisterPhotoEventCallback(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "Wrong number of arguments");
+        return nullptr;
+    }
+
+    napi_valuetype type;
+    napi_typeof(env, args[0], &type);
+    if (type != napi_function) {
+        napi_throw_type_error(env, nullptr, "Argument must be a function");
+        return nullptr;
+    }
+
+    // 保存回调引用
+    {
+        std::lock_guard<std::mutex> lock(g_photoEventMutex);
+
+        // 释放旧的回调引用
+        if (g_photoEventCallbackRef) {
+            napi_delete_reference(g_photoEventEnv, g_photoEventCallbackRef);
+            g_photoEventCallbackRef = nullptr;
+        }
+
+        g_photoEventEnv = env;
+        napi_create_reference(env, args[0], 1, &g_photoEventCallbackRef);
+    }
+
+    // 设置 C++ 层回调（委托给 CaptureManager）
+    exposhot::CaptureManager& manager = exposhot::CaptureManager::getInstance();
+    manager.setPhotoEventCallback(onPhotoEventCallback);
+
+    OH_LOG_INFO(LOG_APP, "PhotoEventCallback registered to CaptureManager");
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+// 处理事件回调（内部使用）
+static void onProcessEventCallback(const exposhot::ProcessEvent& event) {
+    if (!g_processEventCallbackRef || !g_processEventEnv) {
+        return;
+    }
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_processEventEnv, "onProcessEvent", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    // 复制事件数据
+    exposhot::ProcessEvent* eventCopy = new exposhot::ProcessEvent(event);
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_processEventEnv, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段(空操作)
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            exposhot::ProcessEvent* event = static_cast<exposhot::ProcessEvent*>(data);
+
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            napi_get_reference_value(envLocal, g_processEventCallbackRef, &callback);
+            if (callback) {
+                // 创建事件对象
+                napi_value eventObj;
+                napi_create_object(envLocal, &eventObj);
+
+                // 设置 type
+                napi_value typeValue;
+                napi_create_int32(envLocal, static_cast<int32_t>(event->type), &typeValue);
+                napi_set_named_property(envLocal, eventObj, "type", typeValue);
+
+                // 设置 sessionId
+                napi_value sessionIdValue;
+                napi_create_string_utf8(envLocal, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
+                napi_set_named_property(envLocal, eventObj, "sessionId", sessionIdValue);
+
+                // 设置 progress
+                napi_value progressValue;
+                napi_create_int32(envLocal, event->progress, &progressValue);
+                napi_set_named_property(envLocal, eventObj, "progress", progressValue);
+
+                // 设置 currentFrame
+                napi_value currentFrameValue;
+                napi_create_int32(envLocal, event->currentFrame, &currentFrameValue);
+                napi_set_named_property(envLocal, eventObj, "currentFrame", currentFrameValue);
+
+                // 设置 totalFrames
+                napi_value totalFramesValue;
+                napi_create_int32(envLocal, event->totalFrames, &totalFramesValue);
+                napi_set_named_property(envLocal, eventObj, "totalFrames", totalFramesValue);
+
+                // 设置 message (可选)
+                if (!event->message.empty()) {
+                    napi_value messageValue;
+                    napi_create_string_utf8(envLocal, event->message.c_str(), event->message.length(), &messageValue);
+                    napi_set_named_property(envLocal, eventObj, "message", messageValue);
+                }
+
+                // 调用回调
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 1, &eventObj, &retVal);
+            }
+
+            // 清理
+            delete event;
+        },
+        eventCopy, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for process event callback");
+        delete eventCopy;
+        return;
+    }
+
+    napi_queue_async_work_with_qos(g_processEventEnv, work, napi_qos_user_initiated);
+}
+
+// 注册处理事件回调函数
+static napi_value RegisterProcessEventCallback(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "Wrong number of arguments");
+        return nullptr;
+    }
+
+    napi_valuetype type;
+    napi_typeof(env, args[0], &type);
+    if (type != napi_function) {
+        napi_throw_type_error(env, nullptr, "Argument must be a function");
+        return nullptr;
+    }
+
+    // 保存回调引用
+    {
+        std::lock_guard<std::mutex> lock(g_processEventMutex);
+
+        // 释放旧的回调引用
+        if (g_processEventCallbackRef) {
+            napi_delete_reference(g_processEventEnv, g_processEventCallbackRef);
+            g_processEventCallbackRef = nullptr;
+        }
+
+        g_processEventEnv = env;
+        napi_create_reference(env, args[0], 1, &g_processEventCallbackRef);
+    }
+
+    // 设置 C++ 层回调（委托给 CaptureManager）
+    exposhot::CaptureManager& manager = exposhot::CaptureManager::getInstance();
+    manager.setProcessEventCallback(onProcessEventCallback);
+
+    OH_LOG_INFO(LOG_APP, "ProcessEventCallback registered to CaptureManager");
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+// ==================== 文件保存 ====================
+
+// 保存图像到文件
+static napi_value SaveImageToFile(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "Wrong number of arguments");
+        return nullptr;
+    }
+
+    // 获取 ArrayBuffer
+    void* data = nullptr;
+    size_t length = 0;
+    napi_get_arraybuffer_info(env, args[0], &data, &length);
+
+    if (!data || length == 0) {
+        napi_throw_type_error(env, nullptr, "Invalid ArrayBuffer");
+        return nullptr;
+    }
+
+    // 获取文件名（可选）
+    std::string filename;
+    if (argc >= 2) {
+        size_t filenameLen = 0;
+        napi_get_value_string_utf8(env, args[1], nullptr, 0, &filenameLen);
+        filename.resize(filenameLen);
+        napi_get_value_string_utf8(env, args[1], &filename[0], filenameLen + 1, &filenameLen);
+    }
+
+    // 调用 FileSaver 保存
+    exposhot::FileSaver& saver = exposhot::FileSaver::getInstance();
+    std::string outputPath;
+    bool success;
+
+    if (filename.empty()) {
+        success = saver.saveJpeg(data, length, &outputPath);
+    } else {
+        success = saver.save(data, length, filename, &outputPath);
+    }
+
+    if (!success) {
+        napi_throw_error(env, nullptr, "Failed to save image");
+        return nullptr;
+    }
+
+    // 返回保存路径
+    napi_value result;
+    napi_create_string_utf8(env, outputPath.c_str(), outputPath.length(), &result);
+    return result;
+}
+
+// 获取图片保存目录
+static napi_value GetImageSaveDir(napi_env env, napi_callback_info info) {
+    exposhot::FileSaver& saver = exposhot::FileSaver::getInstance();
+    std::string saveDir = saver.getSaveDir();
+
+    napi_value result;
+    napi_create_string_utf8(env, saveDir.c_str(), saveDir.length(), &result);
+    return result;
+}
+
 static napi_value IsPhotoOutputReady(napi_env env, napi_callback_info info) {
     ExpoCamera& camera = ExpoCamera::getInstance();
 
@@ -1144,6 +1478,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"takePhoto", nullptr, TakePhoto, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"registerImageDataCallback", nullptr, RegisterImageDataCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"registerPhotoErrorCallback", nullptr, RegisterPhotoErrorCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"registerPhotoEventCallback", nullptr, RegisterPhotoEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"registerProcessEventCallback", nullptr, RegisterProcessEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isPhotoOutputReady", nullptr, IsPhotoOutputReady, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZoomRatio", nullptr, SetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getZoomRatio", nullptr, GetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1169,6 +1505,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"cancelBurstCapture", nullptr, CancelBurstCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getBurstState", nullptr, GetBurstState, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setBurstImageSize", nullptr, SetBurstImageSize, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // 文件保存
+        {"saveImageToFile", nullptr, SaveImageToFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getImageSaveDir", nullptr, GetImageSaveDir, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
 
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

@@ -69,6 +69,47 @@ using SinglePhotoCallback = std::function<void(const std::string& sessionId, voi
 // errorCode: HarmonyOS 相机错误码
 using PhotoErrorCallback = std::function<void(const std::string& sessionId, int32_t errorCode)>;
 
+// ==================== 事件系统 ====================
+
+// 拍照事件类型
+enum class PhotoEventType {
+    CAPTURE_START = 0,      // 拍照命令已发送
+    CAPTURE_END = 1,        // 拍照成功，原始数据已获取
+    CAPTURE_FAILED = 2,     // 拍照失败
+};
+
+// 处理事件类型
+enum class ProcessEventType {
+    PROCESS_START = 0,      // 开始处理
+    PROCESS_PROGRESS = 1,   // 处理进度更新
+    PROCESS_END = 2,        // 处理完成
+    PROCESS_FAILED = 3,     // 处理失败
+};
+
+// 拍照事件数据
+struct PhotoEvent {
+    PhotoEventType type;
+    std::string sessionId;
+    int32_t frameIndex = -1;     // 连拍帧索引 (0-based)，单拍为 -1
+    std::string message;
+};
+
+// 处理事件数据
+struct ProcessEvent {
+    ProcessEventType type;
+    std::string sessionId;
+    int32_t progress = 0;        // 进度百分比 (0-100)
+    int32_t currentFrame = 0;    // 当前帧
+    int32_t totalFrames = 0;     // 总帧数
+    std::string message;
+};
+
+// 拍照事件回调
+using PhotoEventCallback = std::function<void(const PhotoEvent& event)>;
+
+// 处理事件回调
+using ProcessEventCallback = std::function<void(const ProcessEvent& event)>;
+
 // 拍摄管理器(单例)
 class CaptureManager {
 public:
@@ -83,6 +124,8 @@ public:
     void setImageCallback(BurstImageCallback callback);
     void setSinglePhotoCallback(SinglePhotoCallback callback);
     void setPhotoErrorCallback(PhotoErrorCallback callback);
+    void setPhotoEventCallback(PhotoEventCallback callback);
+    void setProcessEventCallback(ProcessEventCallback callback);
 
     // ==================== 单次拍照 ====================
 
@@ -176,6 +219,8 @@ private:
     BurstImageCallback imageCallback_;
     SinglePhotoCallback singlePhotoCallback_;
     PhotoErrorCallback photoErrorCallback_;
+    PhotoEventCallback photoEventCallback_;
+    ProcessEventCallback processEventCallback_;
 
     // 线程锁
     mutable std::mutex mutex_;

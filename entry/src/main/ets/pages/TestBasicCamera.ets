@@ -114,10 +114,10 @@ struct TestBasicCamera {
       this.cameraStatus = '拍照未就绪';
       return;
     }
-    const sessionId = nativeCamera.takePhoto();
-    if (sessionId && sessionId.length > 0) {
+    const sessionIdRes = nativeCamera.takePhoto();
+    if (sessionIdRes && sessionIdRes.sessionId.length > 0) {
       this.cameraStatus = '正在拍照...';
-      hilog.info(DOMAIN, TAG, 'takePhoto sessionId: %{public}s', sessionId);
+      hilog.info(DOMAIN, TAG, 'takePhoto sessionId: %{public}s', sessionIdRes.sessionId);
     } else {
       this.cameraStatus = '拍照失败: 无法获取 sessionId';
       hilog.error(DOMAIN, TAG, 'takePhoto failed: empty sessionId');

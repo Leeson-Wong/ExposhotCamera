@@ -91,6 +91,30 @@ void CaptureManager::setPhotoErrorCallback(PhotoErrorCallback callback) {
     photoErrorCallback_ = callback;
 }
 
+void CaptureManager::setPhotoEventCallback(PhotoEventCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    photoEventCallback_ = callback;
+}
+
+void CaptureManager::setProcessEventCallback(ProcessEventCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    processEventCallback_ = callback;
+}
+
+// 内部辅助函数：通知拍照事件
+static void notifyPhotoEvent(const PhotoEventCallback& callback, const PhotoEvent& event) {
+    if (callback) {
+        callback(event);
+    }
+}
+
+// 内部辅助函数：通知处理事件
+static void notifyProcessEvent(const ProcessEventCallback& callback, const ProcessEvent& event) {
+    if (callback) {
+        callback(event);
+    }
+}
+
 // ==================== 单次拍照 ====================
 
 int32_t CaptureManager::captureSingle(std::string& outSessionId) {
@@ -111,6 +135,9 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     // 进入单拍状态
     state_.store(CaptureState::SINGLE_CAPTURING);
 
+    // 通知拍照开始事件
+    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_START, sessionId, -1, "Single capture started"});
+
     OH_LOG_INFO(LOG_APP, "Single capture started: sessionId=%{public}s", sessionId.c_str());
 
     // 获取 PhotoOutput 并触发拍照
@@ -118,6 +145,8 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     if (!photoOutput) {
         OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
         state_.store(CaptureState::IDLE);
+        // 通知拍照失败事件
+        notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "PhotoOutput is null"});
         return -ENODEV;  // 系统标准错误码：设备不存在
     }
 
@@ -125,6 +154,8 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     if (err != CAMERA_OK) {
         state_.store(CaptureState::IDLE);
         OH_LOG_ERROR(LOG_APP, "Failed to trigger photo capture: %{public}d", err);
+        // 通知拍照失败事件
+        notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "Failed to trigger photo capture"});
         return static_cast<int32_t>(err);  // 返回 HarmonyOS 相机错误码
     }
 
@@ -143,6 +174,9 @@ void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, int32_t wi
 
     OH_LOG_INFO(LOG_APP, "Single photo captured: sessionId=%{public}s, size=%{public}zu, %{public}dx%{public}d",
                 currentSessionId_.c_str(), size, width, height);
+
+    // 通知拍照结束事件
+    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, -1, "Single photo captured successfully"});
 
     // 直接回调，不经过队列
     if (singlePhotoCallback_) {
@@ -172,6 +206,9 @@ void CaptureManager::onPhotoError(int32_t errorCode) {
 
     OH_LOG_ERROR(LOG_APP, "Photo error: sessionId=%{public}s, errorCode=%{public}d",
                 currentSessionId_.c_str(), errorCode);
+
+    // 通知拍照失败事件
+    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, currentSessionId_, -1, "Photo capture failed"});
 
     // 通知错误回调
     if (photoErrorCallback_) {
@@ -235,6 +272,9 @@ int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSe
     progress_.processedFrames = 0;
     progress_.message = "Starting burst capture";
     notifyProgress();
+
+    // 通知拍照开始事件
+    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_START, sessionId, 0, "Burst capture started"});
 
     OH_LOG_INFO(LOG_APP, "Burst started: sessionId=%{public}s, %{public}d frames, exposure: %{public}dms",
                 sessionId.c_str(), config.frameCount, config.exposureMs);
@@ -312,6 +352,10 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, int32_t wid
     // 更新进度
     progress_.capturedFrames = frameIndex + 1;
     notifyProgress();
+
+    // 通知拍照进度事件
+    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, frameIndex,
+                                           "Frame captured"});
 }
 
 void CaptureManager::startCaptureLoop() {
@@ -339,6 +383,12 @@ void CaptureManager::startCaptureLoop() {
         progress_.state = CaptureState::PROCESSING;
         progress_.message = "All frames captured, processing stacked image";
         notifyProgress();
+
+        // 通知处理开始事件
+        int32_t progress = 0;
+        notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_START, currentSessionId_,
+                          progress, 0, config_.frameCount, "Processing started"});
+
         OH_LOG_INFO(LOG_APP, "Capture completed, switched to PROCESSING state");
     }
 
@@ -382,6 +432,11 @@ void CaptureManager::processTask(ImageTask&& task) {
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to initialize processing session";
             notifyProgress();
+
+            // 通知处理失败事件
+            notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_FAILED, currentSessionId_,
+                              0, 0, config_.frameCount, "Failed to initialize processing session"});
+
             return;
         }
     }
@@ -396,6 +451,13 @@ void CaptureManager::processTask(ImageTask&& task) {
     int32_t processed = processCount_.fetch_add(1) + 1;
     progress_.processedFrames = processed;
     notifyProgress();
+
+    // 计算进度百分比
+    int32_t progressPercent = (processed * 100) / config_.frameCount;
+
+    // 通知处理进度事件
+    notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_PROGRESS, currentSessionId_,
+                      progressPercent, processed, config_.frameCount, "Processing frame"});
 
     // 如果开启实时预览,获取当前累积结果
     if (config_.realtimePreview && imageCallback_) {
@@ -421,10 +483,18 @@ void CaptureManager::processTask(ImageTask&& task) {
             state_.store(CaptureState::COMPLETED);
             progress_.state = CaptureState::COMPLETED;
             progress_.message = "Burst capture completed successfully";
+
+            // 通知处理完成事件
+            notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_END, currentSessionId_,
+                              100, config_.frameCount, config_.frameCount, "Processing completed successfully"});
         } else {
             state_.store(CaptureState::ERROR);
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to finalize processing result";
+
+            // 通知处理失败事件
+            notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_FAILED, currentSessionId_,
+                              progressPercent, processed, config_.frameCount, "Failed to finalize processing result"});
         }
         notifyProgress();
     }

@@ -23,6 +23,9 @@ public:
     FileSaver();
     ~FileSaver();
 
+    // 单例模式
+    static FileSaver& getInstance();
+
     // 初始化（设置保存目录等）
     bool init(const std::string& baseDir = "");
 

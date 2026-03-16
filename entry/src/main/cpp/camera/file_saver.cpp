@@ -24,6 +24,11 @@ FileSaver::FileSaver() {}
 
 FileSaver::~FileSaver() {}
 
+FileSaver& FileSaver::getInstance() {
+    static FileSaver instance;
+    return instance;
+}
+
 bool FileSaver::init(const std::string& baseDir) {
     if (baseDir.empty()) {
         // 使用默认保存目录
