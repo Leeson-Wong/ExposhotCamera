@@ -168,7 +168,7 @@ struct TestFullFeatures {
     if (!result) {
       this.cameraStatus = '正在拍照...';
     } else {
-      this.cameraStatus = `拍照失败: ${result}`;
+      this.cameraStatus = `拍照失败: ${'errorCode' + result.errorCode + '\tsessionId' + result.sessionId}`;
     }
   }
 
