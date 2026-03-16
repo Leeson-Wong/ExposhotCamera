@@ -5,7 +5,7 @@
 Exposhot Camera SDK 是一个 HarmonyOS NDK 相机服务模块，提供：
 
 - 相机预览流的 Surface 切换能力
-- 拍照功能
+- **统一拍摄管理**（单次拍照、连拍堆叠）
 - 相机参数控制（缩放、对焦）
 - 观察者模式支持多渲染模块订阅
 
@@ -13,6 +13,7 @@ Exposhot Camera SDK 是一个 HarmonyOS NDK 相机服务模块，提供：
 - 相机只初始化一次，应用退出时才释放
 - 支持在多个渲染场景间切换预览流
 - 同时支持 ArkTS 和 NDK 渲染模块
+- **拍摄动作互斥**：单拍和连拍不能同时进行
 
 ---
 
@@ -143,19 +144,61 @@ SDK 提供两种拍照模式，适用于不同场景：
 | **单次拍照** | `takePhoto()` | 普通拍照 | 拍完直接返回图片，无后处理 |
 | **连拍堆叠** | `startBurstCapture()` | 天文摄影 | 多帧拍摄 → 堆叠处理 → 返回合成图 |
 
+**重要说明**：单拍和连拍**互斥**，同时只能进行一种拍摄操作。
+
+### 互斥行为
+
+| 当前状态 | 调用 takePhoto() | 调用 startBurstCapture() |
+|----------|------------------|--------------------------|
+| IDLE | ✅ 成功 | ✅ 成功 |
+| SINGLE_CAPTURING | ❌ 被拒绝 | ❌ 被拒绝 |
+| BURST_CAPTURING | ❌ 被拒绝 | ❌ 被拒绝 |
+| PROCESSING | ❌ 被拒绝 | ❌ 被拒绝 |
+
+被拒绝时返回 `errorCode != 0`，建议判断：
+```typescript
+const result = nativeCamera.takePhoto();
+if (result.errorCode !== 0) {
+    console.log(`拍照失败: 错误码 ${result.errorCode}`);
+}
+```
+
 ### 单次拍照
 
 简单流程，拍完直接返回图片数据：
 
 ```
-takePhoto() → capture_start → capture_end + 图片数据
+takePhoto() → 返回 sessionId → onPhotoAvailable → registerImageDataCallback 回调
 ```
 
-| 接口 | 说明 |
-|------|------|
-| `takePhoto()` | 触发拍照 |
-| `registerPhotoEventCallback(callback)` | 注册拍照事件回调 |
-| `registerImageDataCallback(callback)` | 注册图像数据回调 |
+| 接口 | 说明 | 返回值 |
+|------|------|--------|
+| `takePhoto()` | 触发单次拍照 | `{ errorCode, sessionId }` |
+| `registerImageDataCallback(callback)` | 注册图像数据回调 | - |
+| `registerPhotoErrorCallback(callback)` | 注册拍照错误回调 | - |
+
+**示例**：
+```typescript
+// 注册图像数据回调
+nativeCamera.registerImageDataCallback((data) => {
+    console.log(`拍照: ${data.width}x${data.height}`);
+    // 保存图片
+    nativeCamera.saveImageToFile(data.buffer!);
+});
+
+// 注册错误回调
+nativeCamera.registerPhotoErrorCallback((error) => {
+    console.error(`拍照失败: ${error.sessionId}, 错误码: ${error.errorCode}`);
+});
+
+// 触发拍照
+const result = nativeCamera.takePhoto();
+if (result.errorCode !== 0) {
+    console.log(`拍照触发失败: 错误码 ${result.errorCode}`);
+} else {
+    console.log(`拍照已触发: ${result.sessionId}`);
+}
+```
 
 ### 连拍堆叠
 
@@ -165,21 +208,37 @@ takePhoto() → capture_start → capture_end + 图片数据
 startBurstCapture()
     │
     ▼ (循环拍摄 N 帧)
-capture_start → capture_end (每帧)
+每帧 → 图像入队 → 异步处理
     │
-    ▼ (全部拍完后处理)
-process_start → process_progress → process_end
-    │
-    ▼
-image_ready (堆叠合成后的最终图片)
+    ▼ (全部拍完后)
+堆叠处理 → 进度更新 → 最终结果
 ```
 
-| 接口 | 说明 |
-|------|------|
-| `startBurstCapture(config, progressCallback, imageCallback)` | 开始连拍 |
-| `cancelBurstCapture()` | 取消连拍 |
-| `getBurstState()` | 获取连拍状态 |
-| `setBurstImageSize(width, height)` | 设置图像尺寸 |
+| 接口 | 说明 | 返回值 |
+|------|------|--------|
+| `startBurstCapture(config, progressCallback, imageCallback)` | 开始连拍 | `sessionId`，空字符串表示失败 |
+| `cancelBurstCapture()` | 取消连拍 | - |
+| `getBurstState()` | 获取连拍状态 | `BurstState` |
+| `setBurstImageSize(width, height)` | 设置图像尺寸 | - |
+
+**示例**：
+```typescript
+const sessionId = nativeCamera.startBurstCapture(
+    { frameCount: 10, exposureMs: 10000, realtimePreview: true },
+    (progress) => {
+        console.log(`进度: ${progress.processedFrames}/${progress.totalFrames}`);
+    },
+    (buffer, isFinal) => {
+        if (isFinal) {
+            nativeCamera.saveImageToFile(buffer, 'final.jpg');
+        }
+    }
+);
+
+if (sessionId.length === 0) {
+    console.log('连拍启动失败');
+}
+```
 
 ### 文件保存
 
@@ -214,6 +273,11 @@ struct PhotoPage {
         console.log(`已保存: ${path}`);
       }
     });
+
+    // 注册错误回调
+    nativeCamera.registerPhotoErrorCallback((error) => {
+      console.error(`拍照失败: sessionId=${error.sessionId}, errorCode=${error.errorCode}`);
+    });
   }
 
   build() {
@@ -235,7 +299,10 @@ struct PhotoPage {
       Button('拍照')
         .onClick(() => {
           if (nativeCamera.isPhotoOutputReady()) {
-            nativeCamera.takePhoto();
+            const result = nativeCamera.takePhoto();
+            if (result.errorCode !== 0) {
+              console.error(`拍照失败: 错误码 ${result.errorCode}`);
+            }
           }
         })
     }
@@ -440,14 +507,27 @@ nativeCamera.subscribeState((state, message) => {
 
 ## 错误码
 
+### HarmonyOS 相机错误码
+
 | 错误码 | 说明 |
 |--------|------|
 | 0 | 成功 |
-| -1 | 通用错误 |
-| -2 | 相机未初始化 |
-| -3 | 相机已被占用 |
-| -4 | 参数无效 |
-| -5 | 操作不支持 |
+| -1 | 参数无效 (CAMERA_INVALID_ARGUMENT) |
+| -2 | 操作不允许 (CAMERA_OPERATION_NOT_ALLOWED) |
+| -3 | SDK 桩错误 (CAMERA_SDK_STUB_ERROR) |
+| -4 | 内存分配失败 (CAMERA_ALLOC_ERROR) |
+| -5 | 内存不足 (CAMERA_NO_MEMORY) |
+| -6 | 没有权限 (CAMERA_NOT_PERMITTED) |
+| -7 | 不支持 (CAMERA_NOT_SUPPORTED) |
+| -8 | 状态错误 (CAMERA_STATE_ERROR) |
+| -9 | 未知错误 (CAMERA_UNKNOWN_ERROR) |
+
+### 系统标准错误码
+
+| 错误码 | 说明 |
+|--------|------|
+| -16 (-EBUSY) | 设备忙（有其他拍摄进行中） |
+| -19 (-ENODEV) | 设备不存在（PhotoOutput 未初始化） |
 
 ---
 
@@ -458,6 +538,7 @@ nativeCamera.subscribeState((state, message) => {
 3. **线程安全**：所有接口都是线程安全的
 4. **Surface 有效期**：确保 XComponent 销毁前先调用 `unregisterObserver()`
 5. **内存管理**：拍照回调的 `ArrayBuffer` 由调用方管理
+6. **拍摄互斥**：单拍和连拍不能同时进行，需要等待当前拍摄完成
 
 ---
 
@@ -465,4 +546,6 @@ nativeCamera.subscribeState((state, message) => {
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| 2.1.0 | 2026-03-16 | 拍照错误处理：返回值改为 `{ errorCode, sessionId }`，添加 `registerPhotoErrorCallback` |
+| 2.0.0 | 2026-03-16 | 重构：统一拍摄动作到 CaptureManager，实现单拍/连拍互斥 |
 | 1.0.0 | - | 初始版本 |

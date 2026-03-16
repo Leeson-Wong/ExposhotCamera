@@ -1,5 +1,6 @@
-#include "burst_capture.h"
+#include "capture_manager.h"
 #include "expo_camera.h"
+#include "ohcamera/photo_output.h"
 #include "hilog/log.h"
 
 #include <thread>
@@ -11,7 +12,7 @@
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x3200
-#define LOG_TAG "BurstCapture"
+#define LOG_TAG "CaptureManager"
 
 namespace exposhot {
 
@@ -31,25 +32,25 @@ static std::string generateSessionId() {
     return oss.str();
 }
 
-BurstCapture& BurstCapture::getInstance() {
-    static BurstCapture instance;
+CaptureManager& CaptureManager::getInstance() {
+    static CaptureManager instance;
     return instance;
 }
 
-BurstCapture::BurstCapture()
+CaptureManager::CaptureManager()
     : taskQueue_(std::make_unique<TaskQueue>())
     , processor_(std::make_unique<ImageProcessor>()) {
 }
 
-BurstCapture::~BurstCapture() {
+CaptureManager::~CaptureManager() {
     release();
 }
 
-bool BurstCapture::init() {
+bool CaptureManager::init() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (state_.load() != BurstState::IDLE) {
-        OH_LOG_WARN(LOG_APP, "BurstCapture not in IDLE state, current: %{public}d",
+    if (state_.load() != CaptureState::IDLE) {
+        OH_LOG_WARN(LOG_APP, "CaptureManager not in IDLE state, current: %{public}d",
                     static_cast<int>(state_.load()));
         return false;
     }
@@ -59,38 +60,144 @@ bool BurstCapture::init() {
         processTask(std::move(task));
     });
 
-    OH_LOG_INFO(LOG_APP, "BurstCapture initialized");
+    OH_LOG_INFO(LOG_APP, "CaptureManager initialized");
     return true;
 }
 
-void BurstCapture::release() {
+void CaptureManager::release() {
     cancelBurst();
     taskQueue_->stop();
     processor_->reset();
-    OH_LOG_INFO(LOG_APP, "BurstCapture released");
+    OH_LOG_INFO(LOG_APP, "CaptureManager released");
 }
 
-void BurstCapture::setProgressCallback(BurstProgressCallback callback) {
+void CaptureManager::setProgressCallback(BurstProgressCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     progressCallback_ = callback;
 }
 
-void BurstCapture::setImageCallback(BurstImageCallback callback) {
+void CaptureManager::setImageCallback(BurstImageCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     imageCallback_ = callback;
 }
 
-std::string BurstCapture::startBurst(const BurstConfig& config) {
+void CaptureManager::setSinglePhotoCallback(SinglePhotoCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    singlePhotoCallback_ = callback;
+}
+
+void CaptureManager::setPhotoErrorCallback(PhotoErrorCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    photoErrorCallback_ = callback;
+}
+
+// ==================== 单次拍照 ====================
+
+int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (state_.load() != BurstState::IDLE) {
-        OH_LOG_WARN(LOG_APP, "Burst already in progress, state: %{public}d",
+    // 检查是否有拍摄进行中
+    if (isCaptureActive()) {
+        OH_LOG_WARN(LOG_APP, "Capture already in progress, state: %{public}d",
                     static_cast<int>(state_.load()));
-        return "";
+        return -EBUSY;  // 系统标准错误码：设备忙
     }
 
     // 生成 sessionId
     std::string sessionId = generateSessionId();
+    currentSessionId_ = sessionId;
+    currentMode_ = CaptureMode::SINGLE;
+
+    // 进入单拍状态
+    state_.store(CaptureState::SINGLE_CAPTURING);
+
+    OH_LOG_INFO(LOG_APP, "Single capture started: sessionId=%{public}s", sessionId.c_str());
+
+    // 获取 PhotoOutput 并触发拍照
+    Camera_PhotoOutput* photoOutput = getPhotoOutput();
+    if (!photoOutput) {
+        OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
+        state_.store(CaptureState::IDLE);
+        return -ENODEV;  // 系统标准错误码：设备不存在
+    }
+
+    Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput);
+    if (err != CAMERA_OK) {
+        state_.store(CaptureState::IDLE);
+        OH_LOG_ERROR(LOG_APP, "Failed to trigger photo capture: %{public}d", err);
+        return static_cast<int32_t>(err);  // 返回 HarmonyOS 相机错误码
+    }
+
+    outSessionId = sessionId;
+    return 0;  // 成功
+}
+
+void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (state_.load() != CaptureState::SINGLE_CAPTURING) {
+        OH_LOG_WARN(LOG_APP, "Not in SINGLE_CAPTURING state, current: %{public}d",
+                    static_cast<int>(state_.load()));
+        return;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Single photo captured: sessionId=%{public}s, size=%{public}zu, %{public}dx%{public}d",
+                currentSessionId_.c_str(), size, width, height);
+
+    // 直接回调，不经过队列
+    if (singlePhotoCallback_) {
+        singlePhotoCallback_(currentSessionId_, buffer, size, width, height);
+    } else {
+        OH_LOG_WARN(LOG_APP, "No single photo callback set");
+    }
+
+    // 恢复空闲状态
+    state_.store(CaptureState::IDLE);
+    OH_LOG_INFO(LOG_APP, "Single capture completed");
+}
+
+// 拍照错误通知（由 ExpoCamera 调用，异步通知相机硬件错误）
+void CaptureManager::onPhotoError(int32_t errorCode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    CaptureState currentState = state_.load();
+
+    // 只有在拍摄状态下才处理错误
+    if (currentState != CaptureState::SINGLE_CAPTURING &&
+        currentState != CaptureState::BURST_CAPTURING) {
+        OH_LOG_WARN(LOG_APP, "Photo error received but not in capturing state: %{public}d",
+                    static_cast<int>(currentState));
+        return;
+    }
+
+    OH_LOG_ERROR(LOG_APP, "Photo error: sessionId=%{public}s, errorCode=%{public}d",
+                currentSessionId_.c_str(), errorCode);
+
+    // 通知错误回调
+    if (photoErrorCallback_) {
+        photoErrorCallback_(currentSessionId_, errorCode);
+    }
+
+    // 恢复空闲状态
+    state_.store(CaptureState::IDLE);
+    OH_LOG_INFO(LOG_APP, "Capture reset to IDLE due to error");
+}
+
+// ==================== 连拍 ====================
+
+int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSessionId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (state_.load() != CaptureState::IDLE) {
+        OH_LOG_WARN(LOG_APP, "Capture already in progress, state: %{public}d",
+                    static_cast<int>(state_.load()));
+        return -EBUSY;  // 系统标准错误码：设备忙
+    }
+
+    // 生成 sessionId
+    std::string sessionId = generateSessionId();
+    currentSessionId_ = sessionId;
+    currentMode_ = CaptureMode::BURST;
 
     config_ = config;
     config_.sessionId = sessionId;
@@ -102,7 +209,7 @@ std::string BurstCapture::startBurst(const BurstConfig& config) {
 
     // 设置处理器进度回调
     processor_->setProgressCallback([this, sessionId](int32_t current, int32_t total,
-                                                  void* buffer, size_t size) {
+                                                      void* buffer, size_t size) {
         if (config_.realtimePreview && imageCallback_ && buffer) {
             // 复制 buffer（回调后处理器可能释放）
             void* copyBuffer = malloc(size);
@@ -120,9 +227,9 @@ std::string BurstCapture::startBurst(const BurstConfig& config) {
     });
 
     // 更新状态和 sessionId
-    state_.store(BurstState::CAPTURING);
+    state_.store(CaptureState::BURST_CAPTURING);
     progress_.sessionId = sessionId;
-    progress_.state = BurstState::CAPTURING;
+    progress_.state = CaptureState::BURST_CAPTURING;
     progress_.totalFrames = config.frameCount;
     progress_.capturedFrames = 0;
     progress_.processedFrames = 0;
@@ -138,19 +245,20 @@ std::string BurstCapture::startBurst(const BurstConfig& config) {
     });
     captureThread.detach();
 
-    return sessionId;
+    outSessionId = sessionId;
+    return 0;  // 成功
 }
 
-void BurstCapture::cancelBurst() {
-    BurstState expected = BurstState::CAPTURING;
-    if (!state_.compare_exchange_strong(expected, BurstState::CANCELLED)) {
-        expected = BurstState::PROCESSING;
-        if (!state_.compare_exchange_strong(expected, BurstState::CANCELLED)) {
+void CaptureManager::cancelBurst() {
+    CaptureState expected = CaptureState::BURST_CAPTURING;
+    if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
+        expected = CaptureState::PROCESSING;
+        if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
             return;
         }
     }
 
-    progress_.state = BurstState::CANCELLED;
+    progress_.state = CaptureState::CANCELLED;
     progress_.message = "Burst cancelled";
     notifyProgress();
 
@@ -160,19 +268,14 @@ void BurstCapture::cancelBurst() {
     OH_LOG_INFO(LOG_APP, "Burst cancelled");
 }
 
-bool BurstCapture::isBurstActive() const {
-    BurstState s = state_.load();
-    return s == BurstState::CAPTURING || s == BurstState::PROCESSING;
-}
-
-void BurstCapture::onPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height) {
-    if (state_.load() == BurstState::CANCELLED) {
+void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height) {
+    if (state_.load() == CaptureState::CANCELLED) {
         OH_LOG_INFO(LOG_APP, "Burst cancelled, ignoring captured photo");
         return;
     }
 
-    if (state_.load() != BurstState::CAPTURING) {
-        OH_LOG_WARN(LOG_APP, "Not in CAPTURING state, ignoring captured photo");
+    if (state_.load() != CaptureState::BURST_CAPTURING) {
+        OH_LOG_WARN(LOG_APP, "Not in BURST_CAPTURING state, ignoring captured photo");
         return;
     }
 
@@ -211,12 +314,12 @@ void BurstCapture::onPhotoCaptured(void* buffer, size_t size, int32_t width, int
     notifyProgress();
 }
 
-void BurstCapture::startCaptureLoop() {
+void CaptureManager::startCaptureLoop() {
     OH_LOG_INFO(LOG_APP, "Capture loop started, will capture %{public}d frames",
                 config_.frameCount);
 
     for (int32_t i = 0; i < config_.frameCount; i++) {
-        if (state_.load() == BurstState::CANCELLED) {
+        if (state_.load() == CaptureState::CANCELLED) {
             OH_LOG_INFO(LOG_APP, "Burst cancelled, stopping capture loop");
             break;
         }
@@ -231,9 +334,9 @@ void BurstCapture::startCaptureLoop() {
     }
 
     // 拍摄完成,切换到处理状态
-    if (state_.load() == BurstState::CAPTURING) {
-        state_.store(BurstState::PROCESSING);
-        progress_.state = BurstState::PROCESSING;
+    if (state_.load() == CaptureState::BURST_CAPTURING) {
+        state_.store(CaptureState::PROCESSING);
+        progress_.state = CaptureState::PROCESSING;
         progress_.message = "All frames captured, processing stacked image";
         notifyProgress();
         OH_LOG_INFO(LOG_APP, "Capture completed, switched to PROCESSING state");
@@ -242,17 +345,24 @@ void BurstCapture::startCaptureLoop() {
     OH_LOG_INFO(LOG_APP, "Capture loop ended");
 }
 
-void BurstCapture::captureNextFrame() {
-    std::string sessionId = ExpoCamera::getInstance().takePhoto();
-    if (sessionId.empty()) {
-        OH_LOG_ERROR(LOG_APP, "Failed to capture photo: empty sessionId");
+void CaptureManager::captureNextFrame() {
+    // 获取 PhotoOutput 并触发拍照
+    Camera_PhotoOutput* photoOutput = getPhotoOutput();
+    if (!photoOutput) {
+        OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
+        return;
+    }
+
+    Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to capture photo: %{public}d", err);
     } else {
-        OH_LOG_INFO(LOG_APP, "Photo capture triggered, sessionId: %{public}s", sessionId.c_str());
+        OH_LOG_INFO(LOG_APP, "Photo capture triggered");
     }
 }
 
-void BurstCapture::processTask(ImageTask&& task) {
-    if (state_.load() == BurstState::CANCELLED) {
+void CaptureManager::processTask(ImageTask&& task) {
+    if (state_.load() == CaptureState::CANCELLED) {
         OH_LOG_INFO(LOG_APP, "Burst cancelled, skipping task %{public}d", task.taskId);
         return;
     }
@@ -268,8 +378,8 @@ void BurstCapture::processTask(ImageTask&& task) {
 
         if (!processor_->initStacking(config_.frameCount, imageWidth_, imageHeight_)) {
             OH_LOG_ERROR(LOG_APP, "Failed to init processing session");
-            state_.store(BurstState::ERROR);
-            progress_.state = BurstState::ERROR;
+            state_.store(CaptureState::ERROR);
+            progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to initialize processing session";
             notifyProgress();
             return;
@@ -308,28 +418,47 @@ void BurstCapture::processTask(ImageTask&& task) {
             // 通知最终结果
             notifyImage(finalBuffer, finalSize, true);
 
-            state_.store(BurstState::COMPLETED);
-            progress_.state = BurstState::COMPLETED;
+            state_.store(CaptureState::COMPLETED);
+            progress_.state = CaptureState::COMPLETED;
             progress_.message = "Burst capture completed successfully";
         } else {
-            state_.store(BurstState::ERROR);
-            progress_.state = BurstState::ERROR;
+            state_.store(CaptureState::ERROR);
+            progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to finalize processing result";
         }
         notifyProgress();
     }
 }
 
-void BurstCapture::notifyProgress() {
+void CaptureManager::notifyProgress() {
     if (progressCallback_) {
         progressCallback_(progress_);
     }
 }
 
-void BurstCapture::notifyImage(void* buffer, size_t size, bool isFinal) {
+void CaptureManager::notifyImage(void* buffer, size_t size, bool isFinal) {
     if (imageCallback_) {
         imageCallback_(progress_.sessionId, buffer, size, isFinal);
     }
+}
+
+// ==================== 状态查询 ====================
+
+bool CaptureManager::isCaptureActive() const {
+    CaptureState s = state_.load();
+    return s == CaptureState::SINGLE_CAPTURING ||
+           s == CaptureState::BURST_CAPTURING ||
+           s == CaptureState::PROCESSING;
+}
+
+bool CaptureManager::isBurstActive() const {
+    CaptureState s = state_.load();
+    return s == CaptureState::BURST_CAPTURING || s == CaptureState::PROCESSING;
+}
+
+Camera_PhotoOutput* CaptureManager::getPhotoOutput() const {
+    // 通过 ExpoCamera 获取 PhotoOutput
+    return ExpoCamera::getInstance().getPhotoOutput();
 }
 
 } // namespace exposhot

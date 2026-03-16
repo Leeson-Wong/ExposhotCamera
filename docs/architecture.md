@@ -7,8 +7,8 @@
 │                        ExpoCamera SDK                                 │
 │                                                                      │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐              │
-│  │ 相机控制     │    │ 连拍堆叠     │    │ 文件存储     │              │
-│  │ ExpoCamera  │    │BurstCapture │    │ FileSaver   │              │
+│  │ 相机控制     │    │ 拍摄管理     │    │ 文件存储     │              │
+│  │ ExpoCamera  │    │CaptureManager│    │ FileSaver   │              │
 │  └─────────────┘    └─────────────┘    └─────────────┘              │
 │         │                  │                  │                      │
 │         └──────────────────┼──────────────────┘                      │
@@ -73,17 +73,202 @@
 
 | 类 | 职责 | 不负责 |
 |---|------|--------|
-| **ExpoCamera** | 相机控制：初始化、预览、拍照触发、参数设置、接收回调转发数据 | 图像处理、文件IO |
-| **BurstCapture** | 连拍协调：状态管理、收集帧、协调处理流程 | 图像处理、文件IO |
+| **ExpoCamera** | 相机控制：初始化、预览、Surface 切换、参数设置、提供 PhotoOutput | 拍照触发、图像处理、文件IO |
+| **CaptureManager** | 拍摄管理：单次拍照、连拍协调、状态管理、帧收集、协调处理流程 | 图像处理、文件IO |
 | **ImageProcessor** | 图像处理：解码、对齐、堆叠、降噪、色调映射、编码 | 文件IO、拍照触发 |
 | **TaskQueue** | 异步调度：队列管理、线程消费 | 图像处理逻辑 |
 | **FileSaver** | 纯IO：文件写入、路径管理、平台存储API | 图像处理、编码 |
 
 ---
 
-## 2. Surface 切换机制
+## 2. 拍摄管理架构
 
-### 2.1 切换流程
+### 2.1 设计目标
+
+- **统一入口**：所有拍摄动作（单次、连拍）统一由 CaptureManager 管理
+- **互斥保证**：单拍和连拍互斥，同时只能进行一种拍摄操作
+- **状态清晰**：通过状态机明确当前拍摄模式
+
+### 2.2 状态机
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CaptureState 状态机                          │
+│                                                                 │
+│  ┌──────────────┐                                              │
+│  │    IDLE      │ ← 空闲，可以开始新的拍摄                      │
+│  └──────┬───────┘                                              │
+│         │                                                        │
+│         ├─── takePhoto() ────────────────────→ SINGLE_CAPTURING │
+│         │                                          │            │
+│         ├─── startBurstCapture() ──────────────→ BURST_CAPTURING │
+│         │                                          │            │
+│         │                                          ▼            │
+│         │                                    拍照完成/错误       │
+│         │                                          │            │
+│  ┌──────┴───────┐                              ┌──┴─────────┐  │
+│  │ SINGLE_DONE  │ ←────────────────────────── │ PROCESSING │  │
+│  └──────┬───────┘                              └────┬───────┘  │
+│         │                                              │         │
+│         └────────────────── 返回 IDLE ────────────────┘         │
+│                                                             │
+│  任意状态 ──→ cancelBurst() ──→ CANCELLED ──→ IDLE            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.3 互斥检查
+
+```cpp
+bool isCaptureActive() const {
+    CaptureState s = state_.load();
+    return s == SINGLE_CAPTURING ||   // 单拍进行中
+           s == BURST_CAPTURING ||    // 连拍拍摄中
+           s == PROCESSING;          // 连拍处理中
+}
+```
+
+所有拍摄操作前都会检查 `isCaptureActive()`，确保互斥。
+
+---
+
+## 3. 单次拍照架构
+
+### 3.1 拍照流程
+
+```
+[ArkTS 调用 takePhoto()]
+         │
+         ▼
+[CaptureManager::captureSingle()]
+         │
+         ├─── 检查 isCaptureActive()
+         │         │
+         │    是 ──→ 返回 { errorCode: -EBUSY, sessionId: "" }
+         │         │
+         │    否 ──→ 继续
+         │
+         ├─── 生成 sessionId
+         │
+         ├─── state = SINGLE_CAPTURING
+         │
+         ├─── OH_PhotoOutput_Capture()
+         │         │
+         │         ├─── 失败 ──→ 返回 { errorCode: HarmonyOS 错误码, sessionId: "" }
+         │         │
+         │         └─── 成功 ──→ 返回 { errorCode: 0, sessionId: "session_xxx" }
+         │
+         └─── (异步) [onPhotoAvailable 回调]
+                   │
+                   ▼
+         [CaptureManager::onSinglePhotoCaptured()]
+                   │
+                   ├─── 检查 state == SINGLE_CAPTURING
+                   │
+                   ├─── 调用 singlePhotoCallback_
+                   │
+                   └─── state = IDLE
+
+[异步错误] [ExpoCamera::onError]
+                   │
+                   ▼
+         [CaptureManager::onPhotoError]
+                   │
+                   └─── 调用 photoErrorCallback_ ──→ registerPhotoErrorCallback
+```
+
+### 3.2 特点
+
+- **简单直接**：单张照片，直接回调，无需队列
+- **快速响应**：不经过处理队列，拍照完成立即返回
+- **独立状态**：使用 `SINGLE_CAPTURING` 状态，与连拍分离
+
+---
+
+## 4. 连拍堆叠架构
+
+### 4.1 功能特点
+
+- 一次拍摄 N 张（拍摄前已知数量）
+- 长曝光支持（每张 ~10s）
+- 堆叠处理（第1张作为基准，后续每张与累积结果堆叠）
+- 异步处理（拍照不阻塞处理）
+- 实时预览（每次堆叠后返回累积结果）
+
+### 4.2 模块结构
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│   ExpoCamera    │────▶│ CaptureManager  │
+│  (相机控制)      │     │  (拍摄管理)      │
+│                 │     │                 │
+│ 提供 PhotoOutput │     │ - 单次拍照      │
+│                 │     │ - 连拍协调      │
+└─────────────────┘     └────────┬────────┘
+                                 │
+                    ┌────────────┼────────────┐
+                    ▼            ▼            ▼
+            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+            │ImageProcessor│ │  TaskQueue   │ │  FileSaver   │
+            │ (图像处理)    │ │ (异步调度)   │ │ (纯IO)       │
+            │ - 解码       │ │              │ │ - 写文件     │
+            │ - 堆叠       │ │              │ │ - 路径管理   │
+            │ - 编码       │ │              │ │              │
+            └──────────────┘ └──────────────┘ └──────────────┘
+```
+
+### 4.3 数据流向
+
+```
+拍照触发 → 获取原始数据 → 解码 → 处理(堆叠) → 编码 → 落盘 → 回调
+   │            │            │        │      │      |
+ExpoCamera   ExpoCamera   ImageProcessor    FileSaver
+                               │            (纯IO)
+                          CaptureManager
+                          (协调处理)
+```
+
+### 4.4 线程模型
+
+```
+拍照线程 (相机服务线程回调)
+    │
+    ▼
+onPhotoAvailable
+    │
+    ├─ 连拍模式 ──▶ CaptureManager::onBurstPhotoCaptured ──▶ TaskQueue::enqueue
+    │                                                          │
+    │                                                          ▼
+    │                                                    消费者线程
+    │                                                          │
+    │                                                          ▼
+    │                                                    ImageProcessor::processFrame
+    │                                                          │
+    │                                                          ▼
+    │                                                    napi_async_work
+    │                                                          │
+    │                                                          ▼
+    │                                                    UI 主线程 (JS 回调)
+    │
+    └─ 单拍模式 ──▶ CaptureManager::onSinglePhotoCaptured ──▶ napi_async_work ──▶ UI 主线程
+```
+
+### 4.5 状态流转
+
+```
+IDLE ──startBurst()──▶ BURST_CAPTURING ──拍摄完成──▶ PROCESSING ──处理完成──▶ COMPLETED
+    │                        │                           │
+    │                        │                           └──处理失败──▶ ERROR
+    │                        │
+    │                        └──cancelBurst()──▶ CANCELLED
+    │
+    └──任意状态──cancelBurst()──▶ CANCELLED
+```
+
+---
+
+## 5. Surface 切换机制
+
+### 5.1 切换流程
 
 ```
 [场景 A 运行中]
@@ -116,13 +301,13 @@ switchSurface(Surface B)
 
 ---
 
-## 3. RenderSlot 注册机制
+## 6. RenderSlot 注册机制
 
-### 3.1 设计背景
+### 6.1 设计背景
 
 多渲染模块需要接收相机预览流，但 HarmonyOS 相机一次只能输出到一个 Surface。需要一个注册机制让渲染模块注册自己的 Surface，相机 so 管理切换并通知状态变化。
 
-### 3.2 架构
+### 6.2 架构
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -161,14 +346,14 @@ switchSurface(Surface B)
 └─────────────────────────────────────────────────────┘
 ```
 
-### 3.3 注册关系
+### 6.3 注册关系
 
 | 注册方 | 被注册方 | 注册什么 | 目的 |
 |--------|----------|----------|------|
 | 下层渲染模块 | 相机 so | RenderSlot（含 Surface） | 接收预览流和状态通知 |
 | 上层应用 | 相机 so | 状态回调函数 | 接收相机整体状态变化 |
 
-### 3.4 生命周期
+### 6.4 生命周期
 
 ```
 1. 进入页面
@@ -197,174 +382,109 @@ switchSurface(Surface B)
 
 ---
 
-## 4. 连拍堆叠架构
+## 7. 事件系统
 
-### 4.1 功能特点
-
-- 一次拍摄 N 张（拍摄前已知数量）
-- 长曝光支持（每张 ~10s）
-- 堆叠处理（第1张作为基准，后续每张与累积结果堆叠）
-- 异步处理（拍照不阻塞处理）
-- 实时预览（每次堆叠后返回累积结果）
-
-### 4.2 模块结构
+### 7.1 事件流概述
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│   ExpoCamera    │────▶│  BurstCapture   │
-│  (相机控制)      │     │  (连拍协调)      │
-└─────────────────┘     └────────┬────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-            │ImageProcessor│ │  TaskQueue   │ │  FileSaver   │
-            │ (图像处理)    │ │ (异步调度)   │ │ (纯IO)       │
-            │ - 解码       │ │              │ │ - 写文件     │
-            │ - 堆叠       │ │              │ │ - 路径管理   │
-            │ - 编码       │ │              │ │              │
-            └──────────────┘ └──────────────┘ └──────────────┘
-```
-
-### 4.3 数据流向
-
-```
-拍照触发 → 获取原始数据 → 解码 → 处理(堆叠) → 编码 → 落盘 → 回调
-   |            |            |        |      |      |
-ExpoCamera   ExpoCamera   ImageProcessor    FileSaver
-                               |            (纯IO)
-                          BurstCapture
-                          (协调处理)
-```
-
-### 4.4 线程模型
-
-```
-拍照线程 (相机服务线程回调)
-    │
-    ▼
-onPhotoAvailable
-    │
-    ├─ 连拍模式 ──▶ BurstCapture::onPhotoCaptured ──▶ TaskQueue::enqueue
-    │                                                    │
-    │                                                    ▼
-    │                                              消费者线程
-    │                                                    │
-    │                                                    ▼
-    │                                              ImageProcessor::processFrame
-    │                                                    │
-    │                                                    ▼
-    │                                              napi_async_work
-    │                                                    │
-    │                                                    ▼
-    │                                              UI 主线程 (JS 回调)
-    │
-    └─ 普通模式 ──▶ photoCallback_ ──▶ napi_async_work ──▶ UI 主线程
-```
-
-### 4.5 状态流转
-
-```
-IDLE ──startBurst()──▶ CAPTURING ──拍摄完成──▶ PROCESSING ──处理完成──▶ COMPLETED
-    │                      │                        │
-    │                      │                        └──处理失败──▶ ERROR
-    │                      │
-    │                      └──cancelBurst()──▶ CANCELLED
-    │
-    └──任意状态──cancelBurst()──▶ CANCELLED
-```
-
----
-
-## 5. 事件系统
-
-### 5.1 事件流概述
-
-```
-单次拍照（简单流程）:
-  takePhoto() → 返回 sessionId
+单次拍照:
+  takePhoto() → CaptureManager::captureSingle() → 返回 { errorCode, sessionId }
        │
-       ▼
-  capture_start → capture_end + 图片数据 (所有事件携带相同 sessionId)
-
-连拍堆叠（完整流程）:
-  startBurstCapture() → 返回 sessionId
+       ├─── 触发失败 ──→ errorCode != 0（拒绝或相机错误）
        │
-       ▼ (循环拍摄 N 帧)
-  capture_start → capture_end (每帧，       │
+       └─── 触发成功 ──→ errorCode = 0, sessionId 有效
+            │
+            ▼
+  onPhotoAvailable → onSinglePhotoCaptured → singlePhotoCallback_
+       │
+       └──→ ImageData { buffer, sessionId, isFinal: true }
+
+  [异步错误流程]
+  onError → CaptureManager::onPhotoError → photoErrorCallback_
+       │
+       └──→ PhotoError { sessionId, errorCode }
+
+连拍堆叠:
+  startBurstCapture() → CaptureManager::startBurst() → 返回 { errorCode, sessionId }
+       │
+       ├─── 启动失败 ──→ errorCode != 0
+       │
+       └─── 启动成功 ──→ errorCode = 0, sessionId 有效
+            │
+            ▼ (循环拍摄 N 帧)
+  onPhotoAvailable → onBurstPhotoCaptured → TaskQueue::enqueue
+       │
        ▼ (全部拍完后处理)
-  process_start → process_progress → process_end
+  ImageProcessor::processFrame() → 堆叠处理
        │
        ▼
-  image_ready (堆叠合成后的最终图片)
-  (所有事件携带相同 sessionId，便于追踪同一次拍照)
+  ImageData { buffer, sessionId, isFinal: false/true }
 ```
 
-### 5.2 事件类型
-
-| 阶段 | 事件 | 说明 |
-|------|------|------|
-| **拍照** | `capture_start` | 拍照命令已发送 |
-| | `capture_end` | 拍照成功，原始数据已获取 |
-| | `capture_failed` | 拍照失败 |
-| **处理** | `process_start` | 开始处理 |
-| | `process_progress` | 处理进度更新 |
-| | `process_end` | 处理完成 |
-| | `process_failed` | 处理失败 |
-| **数据** | `image_ready` | 图像数据就绪 |
-
-### 5.3 回调接口
+### 7.2 回调接口
 
 ```typescript
-// 单次拍照
-takePhoto(): number;
+// 单次拍照 - 委托给 CaptureManager
+takePhoto(): TakePhotoResult;  // { errorCode: number, sessionId: string }
 
-// 拍照事件回调
-registerPhotoEventCallback(callback: PhotoEventCallback): void;
-
-// 处理事件回调（连拍堆叠用）
-registerProcessEventCallback(callback: ProcessEventCallback): void;
-
-// 图像数据回调
+// 图像数据回调（单次拍照和连拍共用）
 registerImageDataCallback(callback: ImageDataCallback): void;
 
-// 连拍堆叠（独立系统）
+// 拍照错误回调（异步通知硬件错误）
+registerPhotoErrorCallback(callback: PhotoErrorCallback): void;
+
+// 连拍堆叠
 startBurstCapture(
     config: BurstConfig,
     progressCallback: BurstProgressCallback,
     imageCallback: BurstImageCallback
-): boolean;
+): StartBurstResult;  // { errorCode: number, sessionId: string }
+
+// 取消连拍
+cancelBurstCapture(): void;
+
+// 获取拍摄状态
+getBurstState(): BurstState;
 ```
 
-### 5.4 数据结构
+### 7.3 数据结构
 
 ```typescript
-// 拍照事件
-interface PhotoEvent {
-    type: PhotoEventType;  // CAPTURE_START | CAPTURE_END | CAPTURE_FAILED
-    sessionId: string;       // 会话 ID， 关联同一次拍照
-    frameIndex?: number;   // 连拍帧索引
-    message?: string;
+// 拍摄状态枚举
+enum BurstState {
+    IDLE = 0,                // 空闲
+    SINGLE_CAPTURING = 1,    // 单次拍照中
+    BURST_CAPTURING = 2,     // 连拍拍摄中
+    PROCESSING = 3,          // 连拍处理中
+    COMPLETED = 4,           // 连拍完成
+    ERROR = 5,               // 错误
+    CANCELLED = 6,           // 已取消
 }
 
-// 处理事件
-interface ProcessEvent {
-    type: ProcessEventType;    // PROCESS_START | PROCESS_PROGRESS | PROCESS_END | PROCESS_FAILED
-    sessionId: string;           // 会话 ID
-    progress?: number;         // 进度百分比 (0-100)
-    currentFrame?: number;     // 当前帧
-    totalFrames?: number;      // 总帧数
-    message?: string;
+// 拍照结果
+interface TakePhotoResult {
+    errorCode: number;       // 0 成功，负数表示错误码
+    sessionId: string;       // 会话 ID，成功时有值
+}
+
+// 连拍结果
+interface StartBurstResult {
+    errorCode: number;       // 0 成功，负数表示错误码
+    sessionId: string;       // 会话 ID，成功时有值
+}
+
+// 拍照错误信息（异步回调）
+interface PhotoError {
+    sessionId: string;       // 会话 ID
+    errorCode: number;       // HarmonyOS 相机错误码
 }
 
 // 图像数据
 interface ImageData {
     sessionId: string;       // 会话 ID
-    buffer?: ArrayBuffer;      // 图像数据
-    filePath?: string;         // 文件路径
+    buffer: ArrayBuffer;      // 图像数据
     width: number;
     height: number;
-    frameIndex?: number;       // 连拍帧索引
     isFinal: boolean;          // 是否最终结果
 }
 
@@ -388,13 +508,13 @@ interface BurstProgress {
 
 ---
 
-## 6. 文件结构
+## 8. 文件结构
 
 ```
 cpp/
 ├── camera/
 │   ├── expo_camera.h/cpp        # 相机控制
-│   ├── burst_capture.h/cpp      # 连拍管理
+│   ├── capture_manager.h/cpp    # 拍摄管理（统一单拍和连拍）
 │   ├── task_queue.h/cpp         # 异步任务队列
 │   ├── image_processor.h/cpp    # 图像处理
 │   └── file_saver.h/cpp         # 文件保存
@@ -407,7 +527,7 @@ cpp/
 
 ---
 
-## 7. 依赖
+## 9. 依赖
 
 ```cmake
 target_link_libraries(entry PUBLIC

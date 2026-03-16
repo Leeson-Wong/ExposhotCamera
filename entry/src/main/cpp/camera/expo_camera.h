@@ -41,13 +41,12 @@ public:
     Camera_ErrorCode startPreview(const std::string& surfaceId);
     Camera_ErrorCode stopPreview();
 
-    // 拍照
-    using PhotoCallback = std::function<void(const std::string& sessionId, void* buffer, size_t size)>;
-    std::string takePhoto();  // 触发拍照，返回 sessionId
-    void setPhotoCallback(const PhotoCallback& callback) { photoCallback_ = callback; }
+    // 拍照 - 委托给 CaptureManager
+    // 注意：此方法已移至 CaptureManager，此处保留仅为兼容旧代码
+    // 实际拍照逻辑由 CaptureManager::captureSingle() 处理
 
-    // 获取当前拍照 sessionId（用于回调关联）
-    std::string getCurrentSessionId() const { return currentSessionId_; }
+    // 获取 PhotoOutput（供 CaptureManager 使用）
+    Camera_PhotoOutput* getPhotoOutput() const { return photoOutput_; }
 
     // 相机参数
     Camera_ErrorCode setZoomRatio(float ratio);
@@ -85,8 +84,6 @@ public:
     using StateCallback = std::function<void(const std::string& state, const std::string& message)>;
     void subscribeState(const StateCallback& callback);
     void unsubscribeState();
-    
-    void AddToTask(void* buffer, size_t bufferSize);
 
 private:
     ExpoCamera();
@@ -135,17 +132,11 @@ private:
     bool photoOutputAdded_ = false;
     std::mutex mutex_;
 
-    // 拍照回调
-    PhotoCallback photoCallback_;
-
     // 观察者列表
     std::vector<PreviewObserver> observers_;
 
     // 状态订阅
     StateCallback stateCallback_;
-
-    // 当前拍照 sessionId
-    std::string currentSessionId_;
 };
 
 #endif // EXPO_CAMERA_H

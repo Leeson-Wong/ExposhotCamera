@@ -1,31 +1,11 @@
 #include "expo_camera.h"
-#include "burst_capture.h"
+#include "capture_manager.h"
 #include "hilog/log.h"
-#include <cstdint>
-#include <random>
-#include <sstream>
-#include <iomanip>
-#include <chrono>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x3200
 #define LOG_TAG "ExpoCamera"
-
-// 生成唯一的 sessionId
-static std::string generateSessionId() {
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()).count();
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 9999);
-
-    std::ostringstream oss;
-    oss << "photo_" << ms << "_" << std::setw(4) << std::setfill('0') << dis(gen);
-    return oss.str();
-}
 
 ExpoCamera& ExpoCamera::getInstance() {
     static ExpoCamera instance;
@@ -397,40 +377,6 @@ Camera_ErrorCode ExpoCamera::stopPreview() {
     return CAMERA_OK;
 }
 
-std::string ExpoCamera::takePhoto() {
-//    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!initialized_) {
-        OH_LOG_ERROR(LOG_APP, "ExpoCamera not initialized");
-        return "";
-    }
-
-    if (!previewing_) {
-        OH_LOG_ERROR(LOG_APP, "Preview not running");
-        return "";
-    }
-
-    if (!photoOutput_ || !photoOutputAdded_) {
-        OH_LOG_ERROR(LOG_APP, "PhotoOutput not ready or not added to session (photoOutput=%{public}p, added=%{public}d)",
-                     photoOutput_, photoOutputAdded_);
-        return "";
-    }
-
-    // 生成新的 sessionId
-    currentSessionId_ = generateSessionId();
-
-    // 触发拍照（回调通过 setPhotoCallback 提前注册）
-    // TODO: 暂时注释掉实际拍照，测试流程编排
-    // Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput_);
-    // if (err != CAMERA_OK) {
-    //     OH_LOG_ERROR(LOG_APP, "Failed to capture: %{public}d", err);
-    //     return "";
-    // }
-
-    OH_LOG_INFO(LOG_APP, "Photo capture triggered (disabled for testing), sessionId=%{public}s", currentSessionId_.c_str());
-    return currentSessionId_;
-}
-
 // 拍照回调（静态方法）
 void ExpoCamera::onFrameStart(Camera_PhotoOutput* photoOutput) {
     OH_LOG_INFO(LOG_APP, "Photo frame start");
@@ -442,20 +388,14 @@ void ExpoCamera::onFrameShutter(Camera_PhotoOutput* photoOutput, Camera_FrameShu
 
 void ExpoCamera::onFrameEnd(Camera_PhotoOutput* photoOutput, int32_t frameCount) {
     OH_LOG_INFO(LOG_APP, "Photo frame end, count=%{public}d", frameCount);
-
-    ExpoCamera& self = ExpoCamera::getInstance();
-    if (!self.photoCallback_) {
-        OH_LOG_WARN(LOG_APP, "No photo callback set");
-        return;
-    }
-
-    // 通知拍照完成（照片数据获取由你自行实现）
-    // 暂时传入 nullptr 和 0
-    self.photoCallback_(self.currentSessionId_, nullptr, 0);
+    // 注意：实际照片数据在 onPhotoAvailable 中获取
 }
 
 void ExpoCamera::onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode errorCode) {
     OH_LOG_ERROR(LOG_APP, "Photo output error: %{public}d", errorCode);
+
+    // 通知 CaptureManager 拍照失败
+    exposhot::CaptureManager::getInstance().onPhotoError(static_cast<int32_t>(errorCode));
 }
 
 // 照片可用回调（获取实际照片数据）
@@ -542,26 +482,25 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
         return;
     }
 
-    // 复制数据并调用回调
-    // 原始 buffer 直接传递，解码逻辑由接收方（BurstCapture 或 photoCallback）处理
-    if (self.photoCallback_) {
-        void* bufferCopy = malloc(nativeBufferSize);
-        if (bufferCopy) {
-            std::memcpy(bufferCopy, virAddr, nativeBufferSize);
+    // 复制数据并传递给 CaptureManager
+    // CaptureManager 根据当前模式（单拍/连拍）决定如何处理数据
+    void* bufferCopy = malloc(nativeBufferSize);
+    if (bufferCopy) {
+        std::memcpy(bufferCopy, virAddr, nativeBufferSize);
 
-            // 检查是否是连拍模式
-            if (exposhot::BurstCapture::getInstance().isBurstActive()) {
-                // 连拍模式: 通知 BurstCapture (由 BurstCapture 负责解码和释放)
-                // 同时传递图像尺寸信息
-                exposhot::BurstCapture::getInstance().onPhotoCaptured(
-                    bufferCopy, nativeBufferSize, size.width, size.height);
-            } else {
-                // 普通模式: 调用 photoCallback_ (由回调调用者负责解码和释放)
-                self.photoCallback_(self.currentSessionId_, bufferCopy, nativeBufferSize);
-            }
+        // 统一传递给 CaptureManager 处理
+        auto& captureManager = exposhot::CaptureManager::getInstance();
+
+        // 检查当前是单拍还是连拍模式
+        if (captureManager.isBurstActive()) {
+            // 连拍模式
+            captureManager.onBurstPhotoCaptured(bufferCopy, nativeBufferSize, size.width, size.height);
+        } else {
+            // 单拍模式
+            captureManager.onSinglePhotoCaptured(bufferCopy, nativeBufferSize, size.width, size.height);
         }
     } else {
-        OH_LOG_WARN(LOG_APP, "No photo callback set");
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate buffer for photo copy");
     }
 
     // 释放资源

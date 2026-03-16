@@ -32,6 +32,19 @@ export const enum PhotoEventType {
 }
 
 /**
+ * 拍照错误信息（异步回调）
+ */
+export interface PhotoError {
+    sessionId: string;      // 会话 ID，关联同一次拍照的所有事件
+    errorCode: number;      // HarmonyOS 相机错误码
+}
+
+/**
+ * 拍照错误回调
+ */
+export type PhotoErrorCallback = (error: PhotoError) => void;
+
+/**
  * 拍照事件
  */
 export interface PhotoEvent {
@@ -109,6 +122,12 @@ export const registerProcessEventCallback: (callback: ProcessEventCallback) => v
  */
 export const registerImageDataCallback: (callback: ImageDataCallback) => void;
 
+/**
+ * 注册拍照错误回调
+ * @param callback 拍照错误回调
+ */
+export const registerPhotoErrorCallback: (callback: PhotoErrorCallback) => void;
+
 // ==================== 相机控制 ====================
 
 /**
@@ -145,12 +164,19 @@ export const startPreview: (surfaceId: string) => number;
 export const stopPreview: () => number;
 
 /**
- * 拍照
- * 拍照事件通过 registerPhotoEventCallback 接收
- * 图像数据通过 registerImageDataCallback 接收
- * @returns sessionId 用于关联同一次拍照的所有事件
+ * 拍照结果
  */
-export const takePhoto: () => string;
+export interface TakePhotoResult {
+    errorCode: number;      // 0 成功，负数表示错误码
+    sessionId: string;      // 会话 ID，成功时有值
+}
+
+/**
+ * 拍照（单次拍照，委托给 CaptureManager 统一管理）
+ * 图像数据通过 registerImageDataCallback 接收
+ * @returns { errorCode, sessionId } errorCode 为 0 表示成功
+ */
+export const takePhoto: () => TakePhotoResult;
 
 /**
  * 检查拍照输出是否就绪
@@ -313,18 +339,19 @@ export const subscribeState: (callback: StateChangedCallback) => number;
  */
 export const unsubscribeState: () => number;
 
-// ==================== 连拍堆叠 ====================
+// ==================== 拍摄管理 ====================
 
 /**
- * 连拍状态枚举
+ * 拍摄状态枚举（统一管理单次拍照和连拍）
  */
 export const enum BurstState {
-    IDLE = 0,
-    CAPTURING = 1,
-    PROCESSING = 2,
-    COMPLETED = 3,
-    ERROR = 4,
-    CANCELLED = 5,
+    IDLE = 0,                // 空闲
+    SINGLE_CAPTURING = 1,    // 单次拍照中
+    BURST_CAPTURING = 2,     // 连拍拍摄中
+    PROCESSING = 3,          // 连拍处理中
+    COMPLETED = 4,           // 连拍完成
+    ERROR = 5,               // 错误
+    CANCELLED = 6,           // 已取消
 }
 
 /**
@@ -362,17 +389,25 @@ export type BurstProgressCallback = (progress: BurstProgress) => void;
 export type BurstImageCallback = (buffer: ArrayBuffer, isFinal: boolean) => void;
 
 /**
+ * 连拍结果
+ */
+export interface StartBurstResult {
+    errorCode: number;      // 0 成功，负数表示错误码
+    sessionId: string;      // 会话 ID，成功时有值
+}
+
+/**
  * 开始连拍
  * @param config 连拍配置
  * @param progressCallback 进度回调
  * @param imageCallback 图像回调
- * @returns sessionId 用于关联同一次连拍的所有事件，空字符串表示启动失败
+ * @returns { errorCode, sessionId } errorCode 为 0 表示成功
  */
 export const startBurstCapture: (
     config: BurstConfig,
     progressCallback: BurstProgressCallback,
     imageCallback: BurstImageCallback
-) => string;
+) => StartBurstResult;
 
 /**
  * 取消连拍

@@ -3,7 +3,7 @@
 #include <mutex>
 #include <map>
 #include "expo_camera.h"
-#include "burst_capture.h"
+#include "capture_manager.h"
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -16,6 +16,11 @@ static napi_ref g_photoCallbackRef = nullptr;
 static napi_env g_env = nullptr;
 static std::mutex g_callbackMutex;
 static size_t g_photoSize = 0;  // 保存照片大小，用于异步回调
+
+// 拍照错误回调存储
+static napi_ref g_photoErrorCallbackRef = nullptr;
+static napi_env g_photoErrorEnv = nullptr;
+static std::mutex g_photoErrorMutex;
 
 // 观察者回调存储
 struct ObserverCallbackInfo {
@@ -119,6 +124,76 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size)
     }
 
     napi_queue_async_work_with_qos(g_env, work, napi_qos_user_initiated);
+}
+
+// 拍照错误回调（异步通知相机硬件错误）
+static void onPhotoErrorCallback(const std::string& sessionId, int32_t errorCode) {
+    if (!g_photoErrorCallbackRef || !g_photoErrorEnv) {
+        OH_LOG_ERROR(LOG_APP, "Photo error callback not ready");
+        return;
+    }
+
+    OH_LOG_ERROR(LOG_APP, "onPhotoErrorCallback sessionId: %{public}s, errorCode: %{public}d",
+                 sessionId.c_str(), errorCode);
+
+    // 创建异步工作
+    napi_value asyncResourceName = nullptr;
+    napi_create_string_utf8(g_photoErrorEnv, "onPhotoError", NAPI_AUTO_LENGTH, &asyncResourceName);
+
+    // 将 sessionId 和 errorCode 作为 data 的一部分传递
+    struct PhotoErrorData {
+        std::string sessionId;
+        int32_t errorCode;
+    };
+    PhotoErrorData* errorData = new PhotoErrorData{sessionId, errorCode};
+
+    napi_async_work work;
+    napi_status status = napi_create_async_work(
+        g_photoErrorEnv, nullptr, asyncResourceName,
+        [](napi_env envLocal, void* data) {
+            // 异步执行阶段(空操作)
+        },
+        [](napi_env envLocal, napi_status status, void* data) {
+            PhotoErrorData* errorData = static_cast<PhotoErrorData*>(data);
+
+            // 主线程回调阶段
+            napi_value callback = nullptr;
+            napi_get_reference_value(envLocal, g_photoErrorCallbackRef, &callback);
+            if (callback) {
+                // 创建错误对象
+                napi_value errorObj;
+                napi_create_object(envLocal, &errorObj);
+
+                // 设置 sessionId
+                napi_value sessionIdValue;
+                napi_create_string_utf8(envLocal, errorData->sessionId.c_str(),
+                                        errorData->sessionId.length(), &sessionIdValue);
+                napi_set_named_property(envLocal, errorObj, "sessionId", sessionIdValue);
+
+                // 设置 errorCode
+                napi_value errorCodeValue;
+                napi_create_int32(envLocal, errorData->errorCode, &errorCodeValue);
+                napi_set_named_property(envLocal, errorObj, "errorCode", errorCodeValue);
+
+                // 调用回调
+                napi_value retVal;
+                napi_call_function(envLocal, nullptr, callback, 1, &errorObj, &retVal);
+            } else {
+                OH_LOG_ERROR(LOG_APP, "onPhotoErrorCallback callback is null");
+            }
+
+            // 清理内存
+            delete errorData;
+        },
+        errorData, &work);
+
+    if (status != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo error callback");
+        delete errorData;
+        return;
+    }
+
+    napi_queue_async_work_with_qos(g_photoErrorEnv, work, napi_qos_user_initiated);
 }
 
 // 预览流变化回调（观察者模式 - 通知所有观察者）
@@ -488,18 +563,30 @@ static napi_value IsZoomSupported(napi_env env, napi_callback_info info) {
 }
 
 static napi_value TakePhoto(napi_env env, napi_callback_info info) {
-    // takePhoto 触发拍照并返回 sessionId
+    // takePhoto 触发单次拍照，返回错误码和 sessionId
+    // 现在委托给 CaptureManager 统一管理
     // 回调需要先通过 registerImageDataCallback 注册
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    std::string sessionId = camera.takePhoto();
+    exposhot::CaptureManager& manager = exposhot::CaptureManager::getInstance();
+    std::string sessionId;
+    int32_t err = manager.captureSingle(sessionId);
 
-    napi_value result;
-    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &result);
-    return result;
+    // 返回对象: { errorCode: number, sessionId: string }
+    napi_value resultObj;
+    napi_create_object(env, &resultObj);
+
+    napi_value errorCodeValue;
+    napi_create_int32(env, err, &errorCodeValue);
+    napi_set_named_property(env, resultObj, "errorCode", errorCodeValue);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, resultObj, "sessionId", sessionIdValue);
+
+    return resultObj;
 }
 
-// 注册图像数据回调函数
+// 注册图像数据回调函数（单次拍照使用）
 static napi_value RegisterImageDataCallback(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -530,11 +617,55 @@ static napi_value RegisterImageDataCallback(napi_env env, napi_callback_info inf
         napi_create_reference(env, args[0], 1, &g_photoCallbackRef);
     }
 
-    // 设置 C++ 层回调
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    camera.setPhotoCallback(onPhotoData);
+    // 设置 C++ 层回调（委托给 CaptureManager）
+    exposhot::CaptureManager& manager = exposhot::CaptureManager::getInstance();
+    manager.setSinglePhotoCallback(onPhotoData);
 
-    OH_LOG_INFO(LOG_APP, "ImageDataCallback registered");
+    OH_LOG_INFO(LOG_APP, "ImageDataCallback registered to CaptureManager");
+
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+// 注册拍照错误回调函数
+static napi_value RegisterPhotoErrorCallback(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "Wrong number of arguments");
+        return nullptr;
+    }
+
+    napi_valuetype type;
+    napi_typeof(env, args[0], &type);
+    if (type != napi_function) {
+        napi_throw_type_error(env, nullptr, "Argument must be a function");
+        return nullptr;
+    }
+
+    // 保存回调引用
+    {
+        std::lock_guard<std::mutex> lock(g_photoErrorMutex);
+
+        // 释放旧的回调引用
+        if (g_photoErrorCallbackRef) {
+            napi_delete_reference(g_photoErrorEnv, g_photoErrorCallbackRef);
+            g_photoErrorCallbackRef = nullptr;
+        }
+
+        g_photoErrorEnv = env;
+        napi_create_reference(env, args[0], 1, &g_photoErrorCallbackRef);
+    }
+
+    // 设置 C++ 层回调（委托给 CaptureManager）
+    exposhot::CaptureManager& manager = exposhot::CaptureManager::getInstance();
+    manager.setPhotoErrorCallback(onPhotoErrorCallback);
+
+    OH_LOG_INFO(LOG_APP, "PhotoErrorCallback registered to CaptureManager");
 
     napi_value result;
     napi_get_undefined(env, &result);
@@ -932,12 +1063,12 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
     }
 
     // 设置回调
-    exposhot::BurstCapture::getInstance().setProgressCallback(onBurstProgressCallback);
-    exposhot::BurstCapture::getInstance().setImageCallback(onBurstImageCallback);
+    exposhot::CaptureManager::getInstance().setProgressCallback(onBurstProgressCallback);
+    exposhot::CaptureManager::getInstance().setImageCallback(onBurstImageCallback);
 
     // 初始化并启动连拍
-    if (!exposhot::BurstCapture::getInstance().init()) {
-        OH_LOG_ERROR(LOG_APP, "Failed to init BurstCapture");
+    if (!exposhot::CaptureManager::getInstance().init()) {
+        OH_LOG_ERROR(LOG_APP, "Failed to init CaptureManager");
     }
 
     exposhot::BurstConfig config;
@@ -945,16 +1076,27 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
     config.exposureMs = exposureMs;
     config.realtimePreview = realtimePreview;
 
-    std::string sessionId = exposhot::BurstCapture::getInstance().startBurst(config);
+    std::string sessionId;
+    int32_t err = exposhot::CaptureManager::getInstance().startBurst(config, sessionId);
 
-    napi_value napiResult;
-    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &napiResult);
-    return napiResult;
+    // 返回对象: { errorCode: number, sessionId: string }
+    napi_value resultObj;
+    napi_create_object(env, &resultObj);
+
+    napi_value errorCodeValue;
+    napi_create_int32(env, err, &errorCodeValue);
+    napi_set_named_property(env, resultObj, "errorCode", errorCodeValue);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, sessionId.c_str(), sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, resultObj, "sessionId", sessionIdValue);
+
+    return resultObj;
 }
 
 // 取消连拍
 static napi_value CancelBurstCapture(napi_env env, napi_callback_info info) {
-    exposhot::BurstCapture::getInstance().cancelBurst();
+    exposhot::CaptureManager::getInstance().cancelBurst();
 
     napi_value result;
     napi_get_undefined(env, &result);
@@ -963,7 +1105,7 @@ static napi_value CancelBurstCapture(napi_env env, napi_callback_info info) {
 
 // 获取连拍状态
 static napi_value GetBurstState(napi_env env, napi_callback_info info) {
-    int32_t state = static_cast<int32_t>(exposhot::BurstCapture::getInstance().getState());
+    int32_t state = static_cast<int32_t>(exposhot::CaptureManager::getInstance().getState());
 
     napi_value result;
     napi_create_int32(env, state, &result);
@@ -984,7 +1126,7 @@ static napi_value SetBurstImageSize(napi_env env, napi_callback_info info) {
         napi_get_value_int32(env, args[1], &height);
     }
 
-    exposhot::BurstCapture::getInstance().setImageSize(width, height);
+    exposhot::CaptureManager::getInstance().setImageSize(width, height);
 
     napi_value result;
     napi_get_undefined(env, &result);
@@ -1001,6 +1143,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"stopPreview", nullptr, StopPreview, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takePhoto", nullptr, TakePhoto, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"registerImageDataCallback", nullptr, RegisterImageDataCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"registerPhotoErrorCallback", nullptr, RegisterPhotoErrorCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isPhotoOutputReady", nullptr, IsPhotoOutputReady, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZoomRatio", nullptr, SetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getZoomRatio", nullptr, GetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
