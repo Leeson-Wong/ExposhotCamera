@@ -225,35 +225,26 @@ static void onPhotoErrorCallback(const std::string& sessionId, int32_t errorCode
 // 参数: activeSlotId - 当前获得预览流的 slot ID
 //       activeSurfaceId - 当前获得预览流的 surface ID
 static void onPreviewObserver(const std::string& activeSlotId, const std::string& activeSurfaceId) {
-    // 通知所有观察者
-    for (auto& pair : g_observerCallbacks) {
-        ObserverCallbackInfo& info = pair.second;
-
-        if (!info.callbackRef || !info.env) {
-            continue;
-        }
-
-        napi_env env = info.env;
-        napi_value callback;
-        napi_get_reference_value(env, info.callbackRef, &callback);
-
-        if (!callback) {
-            continue;
-        }
-
-        // 创建参数: activeSlotId, activeSurfaceId
-        napi_value argv[2];
-        napi_create_string_utf8(env, activeSlotId.c_str(), activeSlotId.length(), &argv[0]);
-        napi_create_string_utf8(env, activeSurfaceId.c_str(), activeSurfaceId.length(), &argv[1]);
-
-        // 调用回调
-        napi_value global;
-        napi_get_global(env, &global);
-        napi_call_function(env, global, callback, 2, argv, nullptr);
-
-        OH_LOG_INFO(LOG_APP, "Observer callback invoked for slot: %{public}s, activeSlot=%{public}s",
-                    info.slotId.c_str(), activeSlotId.c_str());
+    // 查找对应的 JS callback
+    auto it = g_observerCallbacks.find(activeSlotId);
+    if (it == g_observerCallbacks.end() || !it->second.callbackRef) {
+        return;
     }
+
+    // 调用 JS callback
+    ObserverCallbackInfo &info = it->second;
+    napi_value callback;
+    napi_get_reference_value(info.env, info.callbackRef, &callback);
+
+    napi_value argv[2];
+    napi_create_string_utf8(info.env, activeSlotId.c_str(), activeSlotId.length(), &argv[0]);
+    napi_create_string_utf8(info.env, activeSurfaceId.c_str(), activeSurfaceId.length(), &argv[1]);
+
+    napi_value global;
+    napi_get_global(info.env, &global);
+    napi_call_function(info.env, global, callback, 2, argv, nullptr);
+    OH_LOG_INFO(LOG_APP, "Observer callback invoked for slot: %{public}s, activeSlot=%{public}s",
+                info.slotId.c_str(), activeSlotId.c_str());
 }
 
 // 状态变化回调（从 C++ 调用 ArkTS）
@@ -1038,28 +1029,13 @@ static napi_value RegisterObserver(napi_env env, napi_callback_info info) {
 
     std::string slotId = camera.registerObserver(
         surfaceId,
-        [env](const std::string &slotId) -> PreviewObserverCallback {
+        [env, &args](const std::string &slotId) -> PreviewObserverCallback {
+            ObserverCallbackInfo& cbInfo = g_observerCallbacks[slotId];
+            cbInfo.env = env;
+            cbInfo.slotId = slotId;
+            napi_create_reference(env, args[1], 1, &cbInfo.callbackRef);
             // 返回一个 callback，捕获 slotId
-            return [env, slotId](const std::string &activeSlotId, const std::string &activeSurfaceId) {
-                // 查找对应的 JS callback
-                auto it = g_observerCallbacks.find(slotId);
-                if (it == g_observerCallbacks.end() || !it->second.callbackRef) {
-                    return;
-                }
-
-                // 调用 JS callback
-                ObserverCallbackInfo &info = it->second;
-                napi_value callback;
-                napi_get_reference_value(info.env, info.callbackRef, &callback);
-
-                napi_value argv[2];
-                napi_create_string_utf8(info.env, activeSlotId.c_str(), activeSlotId.length(), &argv[0]);
-                napi_create_string_utf8(info.env, activeSurfaceId.c_str(), activeSurfaceId.length(), &argv[1]);
-
-                napi_value global;
-                napi_get_global(info.env, &global);
-                napi_call_function(info.env, global, callback, 2, argv, nullptr);
-            };
+            return onPreviewObserver;
         },
         nullptr);
     
