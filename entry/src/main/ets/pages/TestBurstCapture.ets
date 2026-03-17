@@ -1,4 +1,4 @@
-import nativeCamera from 'libexpocamera.so';
+import nativeCamera, { BurstConfig, BurstProgress } from 'libexpocamera.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { image } from '@kit.ImageKit';
 import { router } from '@kit.ArkUI';
@@ -16,12 +16,16 @@ struct TestBurstCapture {
 
   // 连拍控制
   @State burstCount: number = 5;
-  @State burstInterval: number = 100; // ms
+  @State burstExposure: number = 10000; // ms
   @State isCapturing: boolean = false;
   @State capturedCount: number = 0;
+  @State processedCount: number = 0;
+  @State progressMessage: string = '';
 
-  // 缩略图列表
+  // 缩略图列表（用于存储中间预览图）
   @State thumbnailList: PixelMap[] = [];
+  // 最终堆叠结果
+  @State finalImage?: PixelMap = undefined;
 
   private xComponentController: XComponentController = new XComponentController();
 
@@ -69,66 +73,122 @@ struct TestBurstCapture {
   }
 
   processPhotoBufferWrapper = (data: nativeCamera.ImageData) => {
+    // 单次拍照模式（非连拍）
     if (!data.buffer) {
-      // LOG 未拿到图像数据
-      return
+      return;
     }
-    this.processPhotoBuffer(data.buffer);
+    this.processPhotoBuffer(data.buffer, data.isFinal);
   }
 
-  async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
+  async processPhotoBuffer(buffer: ArrayBuffer, isFinal: boolean): Promise<void> {
     try {
       const imageSource = image.createImageSource(buffer);
       const pixelMap = await imageSource.createPixelMap();
 
-      // 添加到缩略图列表
-      this.thumbnailList.push(pixelMap);
-      this.capturedCount = this.thumbnailList.length;
-
-      hilog.info(DOMAIN, TAG, 'Captured image %{public}d/%{public}d', this.capturedCount, this.burstCount);
-
-      // 检查是否完成连拍
-      if (this.capturedCount >= this.burstCount) {
+      if (isFinal) {
+        // 最终堆叠结果
+        this.finalImage = pixelMap;
         this.isCapturing = false;
-        this.cameraStatus = `连拍完成: ${this.capturedCount} 张`;
+        this.cameraStatus = `连拍完成: 拍摄 ${this.capturedCount} 张，处理 ${this.processedCount} 张`;
+        hilog.info(DOMAIN, TAG, 'Final stacked image received');
+      } else {
+        // 中间预览图
+        this.thumbnailList.push(pixelMap);
+        hilog.info(DOMAIN, TAG, 'Preview image received, total: %{public}d', this.thumbnailList.length);
       }
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process photo buffer: %{public}s', JSON.stringify(error));
     }
   }
 
-  // 模拟连拍
-  async startBurstCapture(): Promise<void> {
+  // NDK 连拍堆叠
+  startBurstCapture(): void {
     if (!this.photoReady || this.isCapturing) {
+      hilog.warn(DOMAIN, TAG, 'Cannot start burst: photoReady=%{public}s, isCapturing=%{public}s',
+        this.photoReady.toString(), this.isCapturing.toString());
       return;
     }
 
     this.isCapturing = true;
     this.capturedCount = 0;
+    this.processedCount = 0;
     this.thumbnailList = [];
+    this.finalImage = undefined;
+    this.progressMessage = '准备连拍...';
     this.cameraStatus = '正在连拍...';
 
-    for (let i = 0; i < this.burstCount; i++) {
-      if (!this.isCapturing) {
-        break;
-      }
-      nativeCamera.takePhoto();
-      await this.delay(this.burstInterval);
-    }
-  }
+    // 构建连拍配置
+    const config: BurstConfig = {
+      frameCount: this.burstCount,
+      exposureMs: this.burstExposure,
+      realtimePreview: true
+    };
 
-  delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    hilog.info(DOMAIN, TAG, 'Starting burst capture: frameCount=%{public}d, exposureMs=%{public}d',
+      this.burstCount, this.burstExposure);
+
+    // 调用 NDK 连拍 API
+    const result = nativeCamera.startBurstCapture(
+      config,
+      // 进度回调
+      (progress: BurstProgress) => {
+        this.capturedCount = progress.capturedFrames;
+        this.processedCount = progress.processedFrames;
+        this.progressMessage = progress.message;
+
+        const stateStr = ['IDLE', 'SINGLE_CAPTURING', 'BURST_CAPTURING', 'PROCESSING', 'COMPLETED', 'ERROR', 'CANCELLED'][progress.state];
+        hilog.info(DOMAIN, TAG,
+          'Burst progress: state=%{public}s, captured=%{public}d/%{public}d, processed=%{public}d/%{public}d, msg=%{public}s',
+          stateStr, progress.capturedFrames, progress.totalFrames, progress.processedFrames, progress.totalFrames, progress.message);
+
+        this.cameraStatus = `状态: ${stateStr} | 已拍: ${progress.capturedFrames}/${progress.totalFrames} | 已处理: ${progress.processedFrames}`;
+
+        // 连拍完成或出错
+        if (progress.state === nativeCamera.BurstState.COMPLETED ||
+          progress.state === nativeCamera.BurstState.ERROR ||
+          progress.state === nativeCamera.BurstState.CANCELLED) {
+          this.isCapturing = false;
+          if (progress.state === nativeCamera.BurstState.COMPLETED) {
+            this.cameraStatus = `连拍完成: ${progress.capturedFrames} 张`;
+          } else if (progress.state === nativeCamera.BurstState.ERROR) {
+            this.cameraStatus = `连拍失败: ${progress.message}`;
+          } else {
+            this.cameraStatus = `连拍已取消`;
+          }
+        }
+      },
+      // 图像回调 (中间预览 + 最终结果)
+      (buffer: ArrayBuffer, isFinal: boolean) => {
+        hilog.info(DOMAIN, TAG, 'Burst image callback: isFinal=%{public}s, size=%{public}d',
+          isFinal.toString(), buffer.byteLength);
+        this.processPhotoBuffer(buffer, isFinal);
+      }
+    );
+
+    if (result.errorCode !== 0) {
+      hilog.error(DOMAIN, TAG, 'Failed to start burst capture: errorCode=%{public}d', result.errorCode);
+      this.isCapturing = false;
+      this.cameraStatus = `启动失败: 错误码 ${result.errorCode}`;
+      return;
+    }
+
+    hilog.info(DOMAIN, TAG, 'Burst capture started: sessionId=%{public}s', result.sessionId);
   }
 
   stopBurstCapture(): void {
+    if (this.isCapturing) {
+      nativeCamera.cancelBurstCapture();
+      hilog.info(DOMAIN, TAG, 'Burst capture cancelled');
+    }
     this.isCapturing = false;
-    this.cameraStatus = `已停止: 拍摄 ${this.capturedCount} 张`;
   }
 
   clearThumbnails(): void {
     this.thumbnailList = [];
+    this.finalImage = undefined;
     this.capturedCount = 0;
+    this.processedCount = 0;
+    this.progressMessage = '';
     this.cameraStatus = '已清空';
   }
 
@@ -149,7 +209,7 @@ struct TestBurstCapture {
           .layoutWeight(1)
           .textAlign(TextAlign.Center)
 
-        Text(`${this.capturedCount}/${this.burstCount}`)
+        Text(`${this.capturedCount}/${this.burstCount} | ${this.processedCount} processed`)
           .fontSize(14)
           .fontColor(this.isCapturing ? Color.Yellow : Color.White)
       }
@@ -248,7 +308,7 @@ struct TestBurstCapture {
       .justifyContent(FlexAlign.Center)
 
       Row() {
-        Text('间隔(ms):')
+        Text('曝光时间(ms):')
           .fontSize(14)
           .fontColor(Color.White)
 
@@ -257,17 +317,17 @@ struct TestBurstCapture {
           .width(32)
           .height(32)
           .backgroundColor('#666666')
-          .enabled(this.burstInterval > 50)
+          .enabled(this.burstExposure > 1000)
           .onClick(() => {
-            if (this.burstInterval > 50) {
-              this.burstInterval -= 50;
+            if (this.burstExposure > 1000) {
+              this.burstExposure -= 1000;
             }
           })
 
-        Text(`${this.burstInterval}`)
+        Text(`${this.burstExposure}`)
           .fontSize(16)
           .fontColor(Color.White)
-          .width(40)
+          .width(50)
           .textAlign(TextAlign.Center)
 
         Button('+')
@@ -275,10 +335,10 @@ struct TestBurstCapture {
           .width(32)
           .height(32)
           .backgroundColor('#666666')
-          .enabled(this.burstInterval < 1000)
+          .enabled(this.burstExposure < 30000)
           .onClick(() => {
-            if (this.burstInterval < 1000) {
-              this.burstInterval += 50;
+            if (this.burstExposure < 30000) {
+              this.burstExposure += 1000;
             }
           })
       }
@@ -287,10 +347,36 @@ struct TestBurstCapture {
       .backgroundColor('#80000000')
       .justifyContent(FlexAlign.Center)
 
-      // 缩略图列表
+      // 最终堆叠结果
+      if (this.finalImage) {
+        Row() {
+          Text('最终结果')
+            .fontSize(14)
+            .fontColor(Color.White)
+            .margin({ left: 8, right: 8 })
+
+          Image(this.finalImage)
+            .width(80)
+            .height(106)
+            .objectFit(ImageFit.Cover)
+            .border({ width: 2, color: Color.Green })
+            .margin({ left: 4, right: 4 })
+        }
+        .width('100%')
+        .padding({ top: 8, bottom: 8 })
+        .backgroundColor('#60000000')
+        .alignItems(VerticalAlign.Center)
+      }
+
+      // 中间预览图列表
       if (this.thumbnailList.length > 0) {
         Scroll() {
           Row() {
+            Text(`中间预览 (${this.thumbnailList.length})`)
+              .fontSize(12)
+              .fontColor(Color.White)
+              .margin({ left: 8, right: 8 })
+
             ForEach(this.thumbnailList, (thumbnail: PixelMap, index: number) => {
               Image(thumbnail)
                 .width(60)
@@ -313,7 +399,7 @@ struct TestBurstCapture {
           .fontSize(14)
           .width('25%')
           .backgroundColor('#666666')
-          .enabled(this.thumbnailList.length > 0)
+          .enabled(this.thumbnailList.length > 0 || this.finalImage !== undefined)
           .onClick(() => {
             this.clearThumbnails();
           })
