@@ -10,7 +10,7 @@ typedef struct {
 } motion_vec_t;
 
 typedef struct {
-    uint8_t* img_arr[16];
+    uint16_t* img_arr[16];
     motion_vec_t* motion_arr[15];
     uint8_t* alpha_ch;
     uint8_t cir_size;
@@ -18,6 +18,12 @@ typedef struct {
     uint16_t height;
 } circular_buf_t;
 
-extern "C" int motion_analysis_and_stack (circular_buf_t cir_buf_dscr, float * mean_x, float * mean_y);
+#ifdef __cplusplus
+extern "C" {
+#endif
+int motion_analysis_and_stack (circular_buf_t cir_buf_dscr, float * mean_x, float * mean_y);
+#ifdef __cplusplus
+};
+#endif
 
 #endif // TIMELAPSE_LIB_H

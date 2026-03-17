@@ -7,11 +7,11 @@
         "material": {
           "certpath": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001BFE0F7E6649E7DC74F3DF111B69E2116A70C0460356E40C9F7C9CB5D1B0861FE18C6CB39C861BAF",
+          "keyPassword": "0000001B38B9F4D1E95EEF7FE8C5B3AEF7C8C460A282C4C82CFFC5DE1D4063F2FF78C3425AFEFBABDC65A3",
           "profile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p12",
-          "storePassword": "0000001B7B630D27ADB7C417CD91F600B5BE1780CA384E57F79EAF4076B28A9F70490098E181840EA001A2"
+          "storePassword": "0000001BE3EFB5E423C4B70B1C2593A04BC7DE3CCC695C8D6E9C60C756EB2517CE3F88C81D2E19BD188048"
         }
       }
     ],
