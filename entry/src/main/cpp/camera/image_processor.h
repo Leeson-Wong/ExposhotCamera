@@ -70,7 +70,7 @@ public:
     // 返回: 是否成功
     bool decode(void* rawBuffer, size_t rawSize, ImageFormat format,
                 uint8_t** outRgbaBuffer, size_t* outSize,
-                int32_t* outWidth, int32_t* outHeight);
+                uint32_t* outWidth, uint32_t* outHeight);
 
     // ==================== 编码接口 ====================
 
@@ -83,12 +83,12 @@ public:
     // outJpegSize: 输出数据大小
     // 返回: 是否成功
     bool encodeJpeg(uint8_t* rgbaBuffer, size_t rgbaSize,
-                    int32_t width, int32_t height, int32_t quality,
+                    uint32_t width, uint32_t height, int32_t quality,
                     void** outJpegBuffer, size_t* outJpegSize);
 
     // 编码 RGBA 为 PNG
     bool encodePng(uint8_t* rgbaBuffer, size_t rgbaSize,
-                   int32_t width, int32_t height,
+                   uint32_t width, uint32_t height,
                    void** outPngBuffer, size_t* outPngSize);
 
     // ==================== 堆叠接口 ====================
@@ -97,7 +97,7 @@ public:
     // totalFrames: 总帧数
     // width, height: 输出图像尺寸(来自第一帧)
     // 返回: 是否成功
-    bool initStacking(int32_t totalFrames, int32_t width, int32_t height);
+    bool initStacking(int32_t totalFrames, uint32_t width, uint32_t height);
 
     // 处理单帧图像（解码 + 堆叠）
     // frameIndex: 帧索引 (0-based)
@@ -108,7 +108,7 @@ public:
     // isFirst: 是否是第一帧
     // 返回: 是否成功
     bool processFrame(int32_t frameIndex, void* rawBuffer, size_t rawSize,
-                      int32_t width, int32_t height, ImageFormat format, bool isFirst);
+                      uint32_t width, uint32_t height, ImageFormat format, bool isFirst);
 
     // 获取当前累积结果（编码为 JPEG）
     // 调用者负责 free 返回的 buffer
@@ -131,10 +131,10 @@ private:
     // 内部解码实现
     bool decodeJpeg(void* rawBuffer, size_t rawSize,
                     uint8_t** outRgbaBuffer, size_t* outSize,
-                    int32_t* outWidth, int32_t* outHeight);
+                    uint32_t* outWidth, uint32_t* outHeight);
 
     bool decodeNv21(void* rawBuffer, size_t rawSize,
-                    int32_t width, int32_t height,
+                    uint32_t width, uint32_t height,
                     uint8_t** outRgbaBuffer, size_t* outSize);
 
     // 堆叠一帧到累积缓冲区
@@ -155,8 +155,8 @@ private:
     int32_t processedFrames_ = 0;
 
     // 图像尺寸
-    int32_t width_ = 0;
-    int32_t height_ = 0;
+    uint32_t width_ = 0;
+    uint32_t height_ = 0;
 
     // 累积缓冲区（存储 float 累积值，用于精度保持）
     float* accumulateBuffer_ = nullptr;

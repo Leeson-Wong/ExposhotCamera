@@ -67,11 +67,18 @@ target_link_libraries(expocamera PUBLIC
 target_link_libraries(expocamera PUBLIC
     libace_napi.z.so
     libhilog_ndk.z.so
+    librawfile.z.so
     libohcamera.so
     libohimage.so
     libimage_receiver.so
     libnative_image.so
     libnative_buffer.so
+    libnative_window.so
+    libpixelmap.so
+    libimage_source.so
+    libimage_packer_ndk.z.so
+    libimage_packer.so
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_stack/lib/libmotion_stack.so
     ${OPENCV_PATH}/lib/libopencv_calib3d.so.408
     ${OPENCV_PATH}/lib/libopencv_core.so.408
     ${OPENCV_PATH}/lib/libopencv_dnn.so.408
@@ -87,5 +94,4 @@ target_link_libraries(expocamera PUBLIC
     ${OPENCV_PATH}/lib/libopencv_stitching.so.408
     ${OPENCV_PATH}/lib/libopencv_video.so.408
     ${OPENCV_PATH}/lib/libopencv_videoio.so.408
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_stack/lib/libmotion_stack.a
 )
