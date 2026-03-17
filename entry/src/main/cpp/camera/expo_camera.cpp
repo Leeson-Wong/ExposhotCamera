@@ -916,15 +916,16 @@ void ExpoCamera::notifyAllObservers() {
     }
 }
 
-std::string ExpoCamera::registerObserver(const std::string& surfaceId, PreviewObserverCallback callback, void* userData) {
+std::string ExpoCamera::registerObserver(const std::string& surfaceId, BindPreviewObserverCallback bindCallback, void* userData) {
     // 生成唯一的 slot ID
-    static int slotCounter = 0;
+    static uint32_t slotCounter = 0;
     std::string slotId = "slot_" + std::to_string(++slotCounter);
 
+    PreviewObserverCallback previewCallback = bindCallback(slotId);
     PreviewObserver observer;
     observer.slotId = slotId;
     observer.surfaceId = surfaceId;
-    observer.callback = callback;
+    observer.callback = previewCallback;  // callback 已通过参数传入并绑定
     observer.userData = userData;
 
     observers_.push_back(observer);
@@ -932,13 +933,13 @@ std::string ExpoCamera::registerObserver(const std::string& surfaceId, PreviewOb
     OH_LOG_INFO(LOG_APP, "Observer registered: %{public}s, surfaceId=%{public}s",
                 slotId.c_str(), surfaceId.c_str());
 
-    // 如果当前没有活跃的 slot，切换到这个
+    // 如果当前没有活跃的 slot，切换到这个新 slot
     if (activeSlotId_.empty()) {
         switchToSlot(slotId);
     } else {
-        // 通知新观察者当前的活跃状态
-        if (callback) {
-            callback(activeSlotId_, activeSurfaceId_);
+        // 通知新观察者当前的活跃状态（callback 已绑定，可以直接调用）
+        if (observer.callback) {
+            observer.callback(activeSlotId_, activeSurfaceId_);
         }
     }
 

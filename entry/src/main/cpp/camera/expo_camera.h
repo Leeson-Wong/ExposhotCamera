@@ -19,6 +19,7 @@
 // activeSlotId: 当前获得预览流的 slot ID
 // activeSurfaceId: 当前获得预览流的 surface ID
 using PreviewObserverCallback = std::function<void(const std::string& activeSlotId, const std::string& activeSurfaceId)>;
+using BindPreviewObserverCallback = std::function<PreviewObserverCallback(const std::string& slotId)>;
 
 // 观察者信息
 struct PreviewObserver {
@@ -69,7 +70,7 @@ public:
 
     // 观察者管理（新接口）
     // 注册观察者，返回 slotId
-    std::string registerObserver(const std::string& surfaceId, PreviewObserverCallback callback, void* userData = nullptr);
+    std::string registerObserver(const std::string& surfaceId, BindPreviewObserverCallback bindCallback, void* userData = nullptr);
 
     // 注销观察者
     Camera_ErrorCode unregisterObserver(const std::string& slotId);

@@ -32,7 +32,7 @@ struct ObserverCallbackInfo {
     std::string slotId;
 };
 static std::map<std::string, ObserverCallbackInfo> g_observerCallbacks;
-static std::mutex g_observerMutex;
+static std::mutex g_observerMutex;  // 保护 g_observerCallbacks 的访问
 
 // 状态订阅回调存储
 static napi_ref g_stateCallbackRef = nullptr;
@@ -1035,15 +1035,34 @@ static napi_value RegisterObserver(napi_env env, napi_callback_info info) {
 
     // 注册观察者并获取 slotId
     ExpoCamera& camera = ExpoCamera::getInstance();
-    std::string slotId = camera.registerObserver(surfaceId, onPreviewObserver, nullptr);
 
-    // 保存回调引用
-    {
-        ObserverCallbackInfo& cbInfo = g_observerCallbacks[slotId];
-        cbInfo.env = env;
-        cbInfo.slotId = slotId;
-        napi_create_reference(env, args[1], 1, &cbInfo.callbackRef);
-    }
+    std::string slotId = camera.registerObserver(
+        surfaceId,
+        [env](const std::string &slotId) -> PreviewObserverCallback {
+            // 返回一个 callback，捕获 slotId
+            return [env, slotId](const std::string &activeSlotId, const std::string &activeSurfaceId) {
+                // 查找对应的 JS callback
+                auto it = g_observerCallbacks.find(slotId);
+                if (it == g_observerCallbacks.end() || !it->second.callbackRef) {
+                    return;
+                }
+
+                // 调用 JS callback
+                ObserverCallbackInfo &info = it->second;
+                napi_value callback;
+                napi_get_reference_value(info.env, info.callbackRef, &callback);
+
+                napi_value argv[2];
+                napi_create_string_utf8(info.env, activeSlotId.c_str(), activeSlotId.length(), &argv[0]);
+                napi_create_string_utf8(info.env, activeSurfaceId.c_str(), activeSurfaceId.length(), &argv[1]);
+
+                napi_value global;
+                napi_get_global(info.env, &global);
+                napi_call_function(info.env, global, callback, 2, argv, nullptr);
+            };
+        },
+        nullptr);
+    
 
     OH_LOG_INFO(LOG_APP, "Observer registered: %{public}s", slotId.c_str());
 

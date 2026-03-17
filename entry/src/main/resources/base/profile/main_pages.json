@@ -3,7 +3,6 @@
     "pages/Index",
     "pages/TestBasicCamera",
     "pages/TestBurstCapture",
-    "pages/TestFullFeatures",
-    "pages/TestEncodePicture"
+    "pages/TestFullFeatures"
   ]
 }
