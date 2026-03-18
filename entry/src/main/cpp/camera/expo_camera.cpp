@@ -484,7 +484,7 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
 
     // 复制数据并传递给 CaptureManager
     // CaptureManager 根据当前模式（单拍/连拍）决定如何处理数据
-    void* bufferCopy = malloc(nativeBufferSize);
+    void* bufferCopy = malloc(nativeBufferSize); // DNG RAW
     if (bufferCopy) {
         std::memcpy(bufferCopy, virAddr, nativeBufferSize);
 

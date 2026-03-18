@@ -442,3 +442,26 @@ export const saveImageToFile: (buffer: ArrayBuffer, filename?: string) => string
  * @returns 保存目录路径
  */
 export const getImageSaveDir: () => string;
+
+// ==================== 测试接口 ====================
+
+/**
+ * 模拟堆叠过程结果
+ */
+export interface MockStackResult {
+    success: boolean;           // 是否成功
+    nextFrameIndex: number;     // 下一帧索引
+    message: string;            // 结果消息
+}
+
+/**
+ * 模拟堆叠过程（空实现，用于测试 UI 交互）
+ * 不对接相机，只模拟堆叠流程
+ * @param surfaceId Surface ID（用于标识预览流）
+ * @param frameIndex 当前处理的帧索引
+ * @returns 堆叠结果
+ */
+export const mockStackProcess: (
+    surfaceId: string,
+    frameIndex: number
+) => MockStackResult;

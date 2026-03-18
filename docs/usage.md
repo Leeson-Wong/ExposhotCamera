@@ -117,6 +117,9 @@ your-app/
 | `getFocusMode()` | 获取对焦模式 | `FocusMode` |
 | `setFocusPoint(x, y)` | 设置对焦点 | `0` 成功 |
 | `getFocusPoint()` | 获取对焦点 | `{x, y}` |
+| `setFocusDistance(distance)` | 设置对焦距离 | `0` 成功 |
+| `getFocusDistance()` | 获取对焦距离 | `number` |
+| `getFocusDistanceRange()` | 获取对焦距离范围 | `{min, max}` |
 
 ### 观察者模式
 
@@ -246,6 +249,49 @@ if (sessionId.length === 0) {
 |------|------|
 | `saveImageToFile(buffer, filename?)` | 保存图像到文件 |
 | `getImageSaveDir()` | 获取保存目录 |
+
+---
+
+## 测试页面
+
+SDK 提供了完整的测试页面，位于 `entry/src/main/ets/pages/`：
+
+| 页面 | 文件 | 功能 |
+|------|------|------|
+| 首页 | `Index.ets` | 功能入口导航 |
+| 基础相机 | `TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
+| 连拍测试 | `TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
+| 完整功能 | `TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
+| 对焦点测试 | `TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
+
+### 对焦点测试页面
+
+专门用于测试对焦点功能的页面：
+
+```typescript
+// TestFocusPoint.ets 提供的功能
+- 点击预览画面任意位置设置对焦点
+- 黄色 '+' 标记显示当前对焦点
+- 对焦轨迹显示（最近 10 个点）
+- 预设位置快速切换（中心、左上、右上、底部）
+- 对焦模式切换（手动、自动、连续自动）
+- 对焦距离调节滑块（0-10m）
+- 拍照验证对焦效果
+```
+
+**使用方式**：
+
+1. 从首页点击"对焦点测试"进入页面
+2. 点击预览画面任意位置设置对焦点
+3. 使用预设按钮快速切换到常用位置
+4. 查看对焦轨迹了解点击历史
+5. 点击"拍照"验证对焦效果
+
+**注意事项**：
+
+- 点击设置对焦后会自动切换到 AUTO 模式（如果当前是 CONTINUOUS_AUTO）
+- 如果之前是 CONTINUOUS_AUTO 模式，会在 500ms 后自动切回
+- 对焦距离调节需要硬件支持（部分设备可能无效）
 
 ---
 
@@ -546,6 +592,7 @@ nativeCamera.subscribeState((state, message) => {
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| 2.2.0 | 2026-03-18 | Bug 修复：修复第二次拍照 IPC 崩溃（线程安全问题）；修复观察者回调通知；新增对焦点测试页面 |
 | 2.1.0 | 2026-03-16 | 拍照错误处理：返回值改为 `{ errorCode, sessionId }`，添加 `registerPhotoErrorCallback` |
 | 2.0.0 | 2026-03-16 | 重构：统一拍摄动作到 CaptureManager，实现单拍/连拍互斥 |
 | 1.0.0 | - | 初始版本 |

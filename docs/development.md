@@ -121,6 +121,169 @@ takePhoto() → CaptureManager::captureSingle()
 
 ---
 
+## Bug 修复记录
+
+### 2026-03-18：第二次拍照 IPC 崩溃修复
+
+**问题描述**：
+- **症状**：首次拍照成功，第二次拍照必定崩溃
+- **崩溃信息**：`Signal:SIGSEGV(SEGV_MAPERR)@0x006b00630061006a`（地址解码为 "jack"）
+- **崩溃位置**：Binder IPC 线程（`OHOS::ProcessSkeleton::AttachInvokerProcInfo`）
+
+**根本原因**：
+`napi_expo_camera.cpp` 中的全局回调变量没有互斥锁保护，导致数据竞争：
+
+```cpp
+// ❌ 原始代码（无锁保护）
+static napi_ref g_photoCallbackRef = nullptr;
+static napi_env g_env = nullptr;  // ← 与线程绑定的环境
+static size_t g_photoSize = 0;
+
+static void onPhotoData(...) {
+    // 直接访问全局变量，没有锁保护
+    if (!g_photoCallbackRef || !g_env) { ... }
+}
+```
+
+**修复方案**：
+
+1. 添加互斥锁保护
+2. 添加有效标志 (`g_callbackValid`)
+3. 在锁内复制数据，异步回调使用副本
+
+```cpp
+// ✅ 修复后的代码
+static bool g_callbackValid = false;
+static std::mutex g_callbackMutex;
+
+static void onPhotoData(...) {
+    // 1. 在锁保护下获取数据
+    napi_env callbackEnv = nullptr;
+    napi_ref callbackRef = nullptr;
+    bool callbackValid = false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_callbackMutex);
+        callbackValid = g_callbackValid;
+        callbackEnv = g_env;
+        callbackRef = g_photoCallbackRef;
+    }  // ← 锁释放
+
+    // 2. 检查有效性
+    if (!callbackValid || !callbackRef || !callbackEnv) {
+        return;
+    }
+
+    // 3. 创建异步工作时使用拷贝的数据
+    napi_create_async_work(callbackEnv, ...);
+}
+```
+
+**修复范围**：
+- `onPhotoData()` - 单次拍照回调
+- `onPhotoErrorCallback()` - 拍照错误回调
+- `onBurstImageCallback()` - 连拍图像回调
+- `onBurstProgressCallback()` - 连拍进度回调
+- `RegisterImageDataCallback()` - 回调注册
+- `RegisterPhotoErrorCallback()` - 错误回调注册
+- `StartBurstCapture()` - 连拍启动
+
+**验证**：
+- ✅ 连续多次拍照不再崩溃
+- ✅ 连续多次连拍不再崩溃
+- ✅ 混合单拍和连拍不再崩溃
+
+---
+
+### 2026-03-18：观察者回调通知修复
+
+**问题描述**：
+- **症状**：有多个观察者时，只有活跃 slot 的观察者收到通知
+- **影响**：非活跃页面的 UI 状态不更新（如"无预览"提示不消失）
+
+**根本原因**：
+`onPreviewObserver` 只查找并调用活跃 slot 的回调：
+
+```cpp
+// ❌ 原始代码
+static void onPreviewObserver(const std::string& activeSlotId, const std::string& activeSurfaceId) {
+    auto it = g_observerCallbacks.find(activeSlotId);  // ← 只查找活跃 slot
+    if (it == g_observerCallbacks.end()) {
+        return;  // ← 非活跃观察者直接返回
+    }
+    // 只调用活跃观察者的回调...
+}
+```
+
+**修复方案**：
+
+```cpp
+// ✅ 修复后：通知所有观察者
+static void onPreviewObserver(const std::string& activeSlotId, const std::string& activeSurfaceId) {
+    std::lock_guard<std::mutex> lock(g_observerMutex);
+
+    for (auto& pair : g_observerCallbacks) {
+        ObserverCallbackInfo &info = pair.second;
+        if (!info.callbackRef) continue;
+
+        // 为每个观察者调用回调
+        napi_call_function(...);
+    }
+}
+```
+
+**验证**：
+- ✅ 所有观察者都能收到预览状态变化通知
+- ✅ 页面切换时 UI 状态正确更新
+- ✅ `hasPreview` 状态在所有页面正确同步
+
+---
+
+### 2026-03-18：新增对焦点测试页面
+
+**新增文件**：
+- `pages/TestFocusPoint.ets` - 对焦点专门测试页面
+
+**功能特性**：
+1. 点击预览画面设置对焦点（所有对焦模式支持）
+2. 黄色 '+' 标记显示当前对焦点位置
+3. 对焦轨迹可视化（最近 10 个点击点）
+4. 预设位置快速切换（中心、左上、右上、底部）
+5. 对焦距离滑块调节（0-10m）
+6. 拍照验证对焦效果
+
+**技术要点**：
+- XComponent 不直接响应点击事件，需要叠加透明 Column 处理
+- 透明点击层需要始终渲染（不依赖 `hasPreview` 状态）
+- 自动对焦模式切换以确保对焦点生效
+- 对焦轨迹使用渐变透明度显示点击历史
+
+**XComponent 点击事件处理**：
+
+```typescript
+// ❌ 错误：直接在 XComponent 上绑定 onClick
+XComponent({ ... })
+  .onClick((event: ClickEvent) => { ... })  // 不会触发
+
+// ✅ 正确：叠加透明 Column 处理点击
+Stack() {
+  XComponent({ ... })
+
+  // 透明点击层 - 始终渲染
+  Column()
+    .width('100%')
+    .height('100%')
+    .backgroundColor('transparent')
+    .onClick((event: ClickEvent) => {
+      if (!this.hasPreview) {
+        this.cameraStatus = '请等待预览启动';
+        return;
+      }
+      // 处理点击...
+    })
+}
+```
+
 ---
 
 ## 相机模块开发阶段
@@ -339,9 +502,10 @@ if (captureManager.isBurstActive()) {
 | 页面 | 文件 | 用途 |
 |------|------|------|
 | 首页 | `pages/Index.ets` | 功能入口 |
-| 基础相机 | `pages/TestBasicCamera.ets` | 预览、拍照测试 |
-| 连拍测试 | `pages/TestBurstCapture.ets` | 连拍堆叠测试 |
-| 完整功能 | `pages/TestFullFeatures.ets` | 全功能集成测试 |
+| 基础相机 | `pages/TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
+| 连拍测试 | `pages/TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
+| 完整功能 | `pages/TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
+| 对焦点测试 | `pages/TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
 
 ---
 
@@ -367,10 +531,13 @@ if (captureManager.isBurstActive()) {
 | `getZoomRatio()` | 获取缩放比例 |
 | `getZoomRatioRange()` | 获取缩放范围 |
 | `isZoomSupported()` | 是否支持缩放 |
-| `setFocusMode(mode)` | 设置对焦模式 |
+| `setFocusMode(mode)` | 设置对焦模式（MANUAL/AUTO/CONTINUOUS_AUTO） |
 | `getFocusMode()` | 获取对焦模式 |
-| `setFocusPoint(x, y)` | 设置对焦点 |
+| `setFocusPoint(x, y)` | 设置对焦点（x, y 范围 0-1） |
 | `getFocusPoint()` | 获取对焦点 |
+| `setFocusDistance(distance)` | 设置对焦距离（部分设备支持） |
+| `getFocusDistance()` | 获取对焦距离 |
+| `getFocusDistanceRange()` | 获取对焦距离范围 |
 
 ### 观察者模式
 

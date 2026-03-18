@@ -11,8 +11,8 @@
 │                      ExpoCamera SDK                              │
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ ExpoCamera   │──│ BurstCapture │──│ImageProcessor│          │
-│  │  相机控制     │  │  连拍管理     │  │  图像处理     │          │
+│  │ ExpoCamera   │──│CaptureManager│──│ImageProcessor│          │
+│  │  相机控制     │  │  拍摄管理     │  │  图像处理     │          │
 │  └──────────────┘  └──────────────┘  └──────────────┘          │
 │         │                  │                  │                  │
 │         └──────────────────┼──────────────────┘                  │
@@ -43,11 +43,12 @@
 |------|------|
 | **生命周期管理** | 相机初始化、释放、状态维护 |
 | **预览控制** | 启动/停止预览、Surface 切换 |
-| **拍照触发** | 单次拍照、连拍触发 |
 | **参数控制** | 缩放、对焦模式、对焦点设置 |
-| **事件分发** | 接收相机回调并分发给订阅者 |
+| **观察者管理** | 多观察者注册、预览流切换通知 |
+| **事件分发** | 接收相机回调并分发到订阅者 |
 
 ### 不负责
+- 拍照触发（委托给 CaptureManager）
 - 图像处理（解码、堆叠、编码）
 - 文件 IO 操作
 - 具体的拍照业务逻辑
@@ -66,22 +67,22 @@ bool startPreview(const std::string& surfaceId);
 void stopPreview();
 bool switchSurface(const std::string& surfaceId);
 
-// 拍照
-int takePhoto();
-
 // 参数控制
 bool setZoomRatio(float ratio);
 bool setFocusMode(FocusMode mode);
 bool setFocusPoint(float x, float y);
 
-// RenderSlot 管理
-bool registerSlot(const RenderSlot& slot);
-bool unregisterSlot(const std::string& slotId);
+// 观察者管理
+std::string registerObserver(const std::string& surfaceId, BindPreviewObserverCallback bindCallback);
+bool unregisterObserver(const std::string& slotId);
 bool switchToSlot(const std::string& slotId);
 
 // 事件订阅
 void subscribeState(StateCallback callback);
 void unsubscribeState();
+
+// 提供 PhotoOutput（供 CaptureManager 使用）
+Camera_PhotoOutput* getPhotoOutput() const;
 ```
 
 ### 协作关系
@@ -95,37 +96,39 @@ void unsubscribeState();
          ┌─────────────┐
          │ ExpoCamera  │
          └──────┬──────┘
-                │ 1. 触发拍照
-                │ 2. 接收回调
+                │ 1. 提供硬件能力
+                │ 2. 接收回调并转发
                 ▼
     ┌──────────────────────┐
-    │   BurstCapture       │
-    │   (连拍模式时)        │
+    │   CaptureManager     │
+    │   (拍照管理)          │
     └──────────────────────┘
 ```
 
 ---
 
-## 2. BurstCapture（连拍管理代理）
+## 2. CaptureManager（拍摄管理代理）
 
 ### 角色
-连拍堆叠流程的协调者，管理多帧拍摄和处理的状态机。
+拍摄流程的统一协调者，管理单次拍照和连拍的状态机，确保拍摄互斥。
 
 ### 职责
 | 职责 | 说明 |
 |------|------|
-| **状态管理** | 维护连拍状态机（IDLE → CAPTURING → PROCESSING → COMPLETED） |
-| **帧收集** | 接收拍照回调，收集原始帧数据 |
+| **状态管理** | 维护拍摄状态机（IDLE → SINGLE_CAPTURING/BURST_CAPTURING → PROCESSING） |
+| **互斥控制** | 确保单拍和连拍不能同时进行 |
+| **帧收集** | 接收拍照回调，收集原始帧数据（连拍模式） |
 | **流程协调** | 协调拍照、处理、保存的异步流程 |
 | **进度通知** | 向上层报告拍摄和处理进度 |
 
 ### 不负责
 - 具体的图像处理算法
 - 文件写入操作
+- 相机硬件控制（由 ExpoCamera 负责）
 
 ### 状态机
 ```
-                    startBurst()
+                    takePhoto() / startBurst()
                          │
                          ▼
 ┌──────────┐        ┌──────────┐        ┌──────────┐
@@ -144,26 +147,38 @@ void unsubscribeState();
 ### 关键方法
 ```cpp
 // 单例模式
-static BurstCapture& getInstance();
+static CaptureManager& getInstance();
 
-// 连拍控制
-bool startBurst(const BurstConfig& config);
+// 生命周期
+bool init();
+void release();
+
+// 回调设置
+void setProgressCallback(BurstProgressCallback callback);
+void setImageCallback(BurstImageCallback callback);
+void setSinglePhotoCallback(SinglePhotoCallback callback);
+void setPhotoErrorCallback(PhotoErrorCallback callback);
+
+// 单次拍照
+int32_t captureSingle(std::string& outSessionId);
+void onSinglePhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
+
+// 连拍
+int32_t startBurst(const BurstConfig& config, std::string& outSessionId);
 void cancelBurst();
-bool isBurstActive() const;
-
-// 拍照回调（由 ExpoCamera 调用）
-void onPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
+void onBurstPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
 
 // 状态查询
-BurstState getState() const;
-const BurstProgress& getProgress() const;
+bool isCaptureActive() const;  // 包含单拍和连拍
+bool isBurstActive() const;   // 仅连拍（兼容旧接口）
+CaptureState getState() const;
 ```
 
 ### 协作关系
 ```
 ┌─────────────┐                ┌─────────────┐
-│ ExpoCamera  │───────────────▶│ BurstCapture│
-│  (拍照回调)  │ onPhotoCaptured│  (状态协调)  │
+│ ExpoCamera  │───────────────▶│CaptureManager│
+│ (提供 PhotoOutput)          │  (状态协调)  │
 └─────────────┘                └──────┬──────┘
                                       │
                                       │ 1. 提交任务
@@ -320,7 +335,7 @@ bool isRunning() const;
 ### 协作关系
 ```
 ┌──────────────┐                ┌──────────────┐
-│ BurstCapture │                │   Worker     │
+│CaptureManager│                │   Worker     │
 │ (生产者)      │ enqueue()      │  Thread      │
 └──────┬───────┘───────────────▶└──────┬───────┘
        │                                 │
@@ -396,13 +411,19 @@ std::string generateFileName(const std::string& prefix, int32_t index);
 用户调用 takePhoto()
      │
      ▼
-ExpoCamera: 触发拍照
-     │
-     ▼ (回调)
-ExpoCamera: 接收图像数据
+CaptureManager: 检查互斥，生成 sessionId
      │
      ▼
-ExpoCamera: 通过 NAPI 返回给 ArkTS
+ExpoCamera: OH_PhotoOutput_Capture()
+     │
+     ▼ (回调 - IPC 线程)
+ExpoCamera: onPhotoAvailable
+     │
+     ▼
+CaptureManager: onSinglePhotoCaptured
+     │
+     ▼ (异步)
+NAPI 回调: 返回 ImageData 给 ArkTS
 ```
 
 ### 场景 2：连拍堆叠
@@ -411,14 +432,14 @@ ExpoCamera: 通过 NAPI 返回给 ArkTS
 用户调用 startBurstCapture()
      │
      ▼
-BurstCapture: 初始化状态机
+CaptureManager: 初始化状态机，启动 TaskQueue
      │
      ▼
 ExpoCamera: 循环触发拍照 (N 次)
      │
      ├─────────────────────────────────┐
      ▼                                 ▼
-ExpoCamera: onPhotoAvailable    BurstCapture: 收集帧
+ExpoCamera: onPhotoAvailable    CaptureManager: 收集帧
      │                                 │
      └─────────────────────────────────┘
                                        │
@@ -437,6 +458,67 @@ ExpoCamera: onPhotoAvailable    BurstCapture: 收集帧
                                        │
                                        ▼
                                 NAPI 回调: 返回结果
+```
+
+### 场景 3：预览流切换
+
+```
+页面 A 注册观察者
+     │
+     ▼
+ExpoCamera: registerObserver(surfaceId, callback)
+     │
+     ▼
+返回 slotId_A
+     │
+     ▼
+用户切换到页面 B
+     │
+     ▼
+ExpoCamera: switchToSlot(slotId_B)
+     │
+     ▼
+ExpoCamera: switchSurface(surfaceId_B)
+     │
+     ▼
+ExpoCamera: notifyAllObservers(activeSlotId=slotId_B)
+     │
+     ├────────────────┬────────────────┐
+     ▼                ▼                ▼
+观察者 A 回调      观察者 B 回调      ...
+(hasPreview=false)  (hasPreview=true)
+```
+
+---
+
+## 线程安全设计
+
+### 全局回调变量保护
+
+由于相机回调来自 IPC 线程，而 NAPI 回调必须在主线程执行，需要特殊的线程安全处理。
+
+| 变量 | 用途 | 保护方式 |
+|------|------|----------|
+| `g_photoCallbackRef` | 单拍图像回调 | `g_callbackMutex` + `g_callbackValid` |
+| `g_photoErrorCallbackRef` | 拍照错误回调 | `g_photoErrorMutex` + `g_photoErrorCallbackValid` |
+| `g_burstProgressCallbackRef` | 连拍进度回调 | `g_burstMutex` + `g_burstProgressCallbackValid` |
+| `g_burstImageCallbackRef` | 连拍图像回调 | `g_burstMutex` + `g_burstImageCallbackValid` |
+| `g_observerCallbacks` | 观察者回调映射 | `g_observerMutex` |
+
+### 线程模型
+
+```
+IPC 线程 (相机回调)                      主线程 (ArkTS)
+     │                                          │
+     ▼                                          ▼
+onPhotoAvailable()                         napi_async_work
+     │                                          │
+     ├─ 问题：不能直接调用 JS 回调              ├─ 解决：异步工作队列
+     │                                          │
+     └─→ 创建 napi_async_work ─────────────────▶ execute (主线程)
+                                                     │
+                                                     ▼
+                                               JS callback()
 ```
 
 ---
@@ -458,6 +540,9 @@ ExpoCamera: onPhotoAvailable    BurstCapture: 收集帧
 ### 5. 错误隔离
 每个代理独立处理错误，不传播到其他模块。
 
+### 6. 拍摄互斥
+单拍和连拍共享状态机，确保同时只能进行一种拍摄操作。
+
 ---
 
 ## 文件映射
@@ -465,8 +550,18 @@ ExpoCamera: onPhotoAvailable    BurstCapture: 收集帧
 | 代理 | 文件 |
 |------|------|
 | ExpoCamera | `camera/expo_camera.h`, `camera/expo_camera.cpp` |
-| BurstCapture | `camera/burst_capture.h`, `camera/burst_capture.cpp` |
+| CaptureManager | `camera/capture_manager.h`, `camera/capture_manager.cpp` |
 | ImageProcessor | `camera/image_processor.h`, `camera/image_processor.cpp` |
 | TaskQueue | `camera/task_queue.h`, `camera/task_queue.cpp` |
 | FileSaver | `camera/file_saver.h`, `camera/file_saver.cpp` |
 | NAPI 桥接 | `napi_expo_camera.cpp` |
+
+---
+
+## 版本历史
+
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| 2.2.0 | 2026-03-18 | 更新：BurstCapture 替换为 CaptureManager（统一单拍和连拍）；添加线程安全设计说明 |
+| 2.0.0 | 2026-03-16 | 重构：统一拍摄动作到 CaptureManager，实现单拍/连拍互斥 |
+| 1.0.0 | - | 初始版本 |

@@ -39,6 +39,20 @@ struct Index {
           '双预览、Slot 切换、完整相机控制',
           'pages/TestFullFeatures'
         )
+
+        // 对焦点测试
+        this.buildTestEntry(
+          '对焦点测试',
+          '手动设置对焦点、对焦轨迹、预设位置',
+          'pages/TestFocusPoint'
+        )
+
+        // 模拟堆叠测试
+        this.buildTestEntry(
+          '模拟堆叠测试',
+          '堆叠过程模拟、进度可视化、NDK 接口测试',
+          'pages/TestStackSimulate'
+        )
       }
       .width('90%')
       .layoutWeight(1)

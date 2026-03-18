@@ -3,6 +3,8 @@
     "pages/Index",
     "pages/TestBasicCamera",
     "pages/TestBurstCapture",
-    "pages/TestFullFeatures"
+    "pages/TestFullFeatures",
+    "pages/TestFocusPoint",
+    "pages/TestStackSimulate"
   ]
 }

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include "opencv2/opencv.hpp"
 
 // HarmonyOS Image Native API
 #include <multimedia/image_framework/image/image_native.h>
@@ -64,6 +65,30 @@ bool ImageProcessor::decode(void* rawBuffer, size_t rawSize, ImageFormat format,
 bool ImageProcessor::decodeJpeg(void* rawBuffer, size_t rawSize,
                                 uint8_t** outRgbaBuffer, size_t* outSize,
                                 int32_t* outWidth, int32_t* outHeight) {
+    if (!rawBuffer || !outWidth || !outHeight) {
+        return false;
+    }
+
+    // 1. 将原始 BGRA16 数据封装为 OpenCV Mat
+    // 假设 BGRA16 对应 CV_16UC4 (4通道，每通道16位无符号整型)
+    cv::Mat bgra16Mat(*outHeight, *outWidth, CV_16UC4, rawBuffer);
+
+    // 2. 转换为 RGBA 8-bit
+    // 第一步：将 16-bit 转换为 8-bit (通常需要缩放，16位最大值65535 -> 8位255)
+    cv::Mat bgra8Mat;
+    bgra16Mat.convertTo(bgra8Mat, CV_8UC4, 1.0 / 256.0);
+
+    // 第二步：将 BGRA 转换为 RGBA
+    cv::Mat rgba8Mat;
+    cv::cvtColor(bgra8Mat, rgba8Mat, cv::COLOR_BGRA2RGBA);
+
+    // 3. 准备输出数据
+    *outSize = rgba8Mat.total() * rgba8Mat.elemSize();
+    *outRgbaBuffer = (uint8_t*)malloc(*outSize);
+
+    if (*outRgbaBuffer) {
+        std::memcpy(*outRgbaBuffer, rgba8Mat.data, *outSize);
+    }
     return true;
 }
 

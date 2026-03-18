@@ -527,7 +527,125 @@ cpp/
 
 ---
 
-## 9. 依赖
+## 9. 线程安全与并发控制
+
+### 9.1 NAPI 回调线程模型
+
+HarmonyOS 的 NAPI 框架中，JavaScript 回调必须在主线程执行，但相机回调来自 IPC 线程。这需要特殊的线程安全处理。
+
+```
+IPC 线程 (相机回调)                      主线程 (ArkTS)
+     │                                          │
+     ▼                                          ▼
+onPhotoAvailable()                         napi_async_work
+     │                                          │
+     ├─ 问题：不能直接调用 JS 回调              ├─ 解决：异步工作队列
+     │                                          │
+     └─→ 创建 napi_async_work ─────────────────▶ execute (主线程)
+                                                     │
+                                                     ▼
+                                               JS callback()
+```
+
+### 9.2 全局回调变量保护
+
+**问题**：全局回调变量在多线程环境下存在数据竞争。
+
+**原始代码（不安全）**：
+```cpp
+static napi_ref g_photoCallbackRef = nullptr;
+static napi_env g_env = nullptr;  // ← 与线程绑定
+
+static void onPhotoData(...) {
+    // IPC 线程直接访问全局变量 ❌
+    if (!g_photoCallbackRef || !g_env) { ... }
+}
+```
+
+**修复方案（线程安全）**：
+```cpp
+static bool g_callbackValid = false;       // 有效标志
+static std::mutex g_callbackMutex;         // 互斥锁
+
+static void onPhotoData(...) {
+    // 1. 在锁保护下复制数据到局部变量
+    napi_env callbackEnv = nullptr;
+    napi_ref callbackRef = nullptr;
+    bool callbackValid = false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_callbackMutex);
+        callbackValid = g_callbackValid;
+        callbackEnv = g_env;
+        callbackRef = g_photoCallbackRef;
+    }  // ← 锁释放
+
+    // 2. 使用局部变量创建异步工作
+    napi_create_async_work(callbackEnv, ...);
+}
+```
+
+### 9.3 回调注册时的原子化更新
+
+**问题**：注册回调时，旧回调可能正在被使用。
+
+```cpp
+static napi_value RegisterImageDataCallback(...) {
+    std::lock_guard<std::mutex> lock(g_callbackMutex);
+
+    // 1. 先标记为无效（防止新请求使用旧回调）
+    g_callbackValid = false;
+
+    // 2. 释放旧引用
+    if (g_photoCallbackRef && g_env) {
+        napi_delete_reference(g_env, g_photoCallbackRef);
+    }
+
+    // 3. 更新引用
+    g_env = env;
+    napi_create_reference(env, args[0], 1, &g_photoCallbackRef);
+
+    // 4. 标记为有效
+    g_callbackValid = true;
+}
+```
+
+### 9.4 需要线程保护的全局变量
+
+| 变量 | 用途 | 保护方式 |
+|------|------|----------|
+| `g_photoCallbackRef` | 单拍图像回调 | `g_callbackMutex` + `g_callbackValid` |
+| `g_photoErrorCallbackRef` | 拍照错误回调 | `g_photoErrorMutex` + `g_photoErrorCallbackValid` |
+| `g_burstProgressCallbackRef` | 连拍进度回调 | `g_burstMutex` + `g_burstProgressCallbackValid` |
+| `g_burstImageCallbackRef` | 连拍图像回调 | `g_burstMutex` + `g_burstImageCallbackValid` |
+| `g_observerCallbacks` | 观察者回调映射 | `g_observerMutex` |
+
+### 9.5 观察者通知修复
+
+**问题**：`onPreviewObserver` 只通知活跃 slot 的观察者。
+
+**修复**：
+```cpp
+// ❌ 修复前：只通知活跃观察者
+static void onPreviewObserver(...) {
+    auto it = g_observerCallbacks.find(activeSlotId);
+    // 只调用活跃 slot 的回调
+}
+
+// ✅ 修复后：通知所有观察者
+static void onPreviewObserver(...) {
+    std::lock_guard<std::mutex> lock(g_observerMutex);
+
+    for (auto& pair : g_observerCallbacks) {
+        // 为每个观察者调用回调
+        napi_call_function(...);
+    }
+}
+```
+
+---
+
+## 10. 依赖
 
 ```cmake
 target_link_libraries(entry PUBLIC
