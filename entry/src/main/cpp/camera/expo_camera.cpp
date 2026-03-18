@@ -89,6 +89,13 @@ Camera_ErrorCode ExpoCamera::release() {
     previewing_ = false;
     photoOutputAdded_ = false;
 
+    // 清理活跃状态
+    activeSlotId_.clear();
+    activeSurfaceId_.clear();
+
+    // 清理观察者列表
+    observers_.clear();
+
     // 释放 Session
     if (captureSession_) {
         OH_CaptureSession_Stop(captureSession_);
@@ -352,6 +359,22 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     activeSurfaceId_ = surfaceId;
     previewing_ = true;
     OH_LOG_INFO(LOG_APP, "Preview started successfully");
+
+    // 如果没有活跃的 slot，设置当前 surfaceId 对应的 slot 为活跃
+    if (activeSlotId_.empty()) {
+        // 查找使用此 surfaceId 的观察者
+        for (const auto& observer : observers_) {
+            if (observer.surfaceId == surfaceId) {
+                activeSlotId_ = observer.slotId;
+                OH_LOG_INFO(LOG_APP, "Set active slot: %{public}s", activeSlotId_.c_str());
+                break;
+            }
+        }
+    }
+
+    // 通知所有观察者预览已启动
+    notifyAllObservers();
+
     return CAMERA_OK;
 }
 

@@ -41,6 +41,9 @@ struct TestFocusPoint {
   @State focusDistanceMin: number = 0.0;
   @State focusDistanceMax: number = 10.0;
 
+  // 提示显示控制
+  @State showFocusHint: boolean = true;
+
   private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
@@ -74,8 +77,32 @@ struct TestFocusPoint {
   }
 
   onPreviewChanged = (activeSlotId: string, activeSurfaceId: string): void => {
-    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s', activeSlotId);
-    this.hasPreview = (activeSlotId === this.slotId && activeSlotId !== '');
+    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s, this.slotId=%{public}s, activeSurfaceId=%{public}s',
+              activeSlotId, this.slotId, activeSurfaceId);
+
+    // 如果 this.slotId 还没设置（registerObserver 还没返回），但 activeSlotId 不为空
+    // 说明这是在 registerObserver 内部触发的回调，此时应该设置为有预览
+    // 因为当前正在注册的 observer 就是即将成为活跃的 observer
+    if (this.slotId === '' && activeSlotId !== '') {
+      hilog.info(DOMAIN, TAG, 'this.slotId not set yet, but activeSlotId is not empty, assuming will match');
+      // 延迟检查，等待 this.slotId 被设置
+      setTimeout(() => {
+        if (this.slotId === activeSlotId) {
+          this.hasPreview = true;
+          this.cameraStatus = '预览中';
+          this.photoReady = nativeCamera.isPhotoOutputReady();
+          this.initCameraParams();
+          hilog.info(DOMAIN, TAG, 'Delayed check: hasPreview set to true');
+        }
+      }, 50);
+      return;
+    }
+
+    const shouldHavePreview = (activeSlotId === this.slotId && activeSlotId !== '');
+    hilog.info(DOMAIN, TAG, 'hasPreview check: activeSlotId === this.slotId = %{public}s, activeSlotId !== \'\' = %{public}s, result = %{public}s',
+              (activeSlotId === this.slotId).toString(), (activeSlotId !== '').toString(), shouldHavePreview.toString());
+    this.hasPreview = shouldHavePreview;
+    hilog.info(DOMAIN, TAG, 'hasPreview set to: %{public}s', this.hasPreview.toString());
 
     if (activeSlotId !== '') {
       this.cameraStatus = '预览中';
@@ -85,9 +112,13 @@ struct TestFocusPoint {
   }
 
   registerObserver(surfaceId: string): string {
+    hilog.info(DOMAIN, TAG, 'registerObserver called with surfaceId=%{public}s', surfaceId);
     const slotId = nativeCamera.registerObserver(surfaceId, this.onPreviewChanged);
+    hilog.info(DOMAIN, TAG, 'registerObserver returned slotId=%{public}s', slotId);
+    this.slotId = slotId;
+    hilog.info(DOMAIN, TAG, 'this.slotId set to=%{public}s', this.slotId);
     nativeCamera.startPreview(surfaceId);
-    hilog.info(DOMAIN, TAG, 'registerObserver: slotId=%{public}s', slotId);
+    hilog.info(DOMAIN, TAG, 'startPreview called with surfaceId=%{public}s', surfaceId);
     return slotId;
   }
 
@@ -269,6 +300,8 @@ struct TestFocusPoint {
               hilog.warn(DOMAIN, TAG, 'Preview not ready, ignoring click');
               return;
             }
+            // 隐藏提示
+            this.showFocusHint = false;
             const targetArea = event.target.area;
             const x = event.x / (Number(targetArea.width.toString() || '1'));
             const y = event.y / (Number(targetArea.height.toString() || '1'));
@@ -325,7 +358,7 @@ struct TestFocusPoint {
         }
 
         // 提示文字
-        if (this.hasPreview) {
+        if (this.hasPreview && this.showFocusHint) {
           Text('点击画面设置对焦点')
             .fontSize(14)
             .fontColor(Color.Yellow)

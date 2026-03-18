@@ -282,11 +282,19 @@ static void onPhotoErrorCallback(const std::string& sessionId, int32_t errorCode
 // 参数: activeSlotId - 当前获得预览流的 slot ID
 //       activeSurfaceId - 当前获得预览流的 surface ID
 static void onPreviewObserver(const std::string& activeSlotId, const std::string& activeSurfaceId) {
+    OH_LOG_INFO(LOG_APP, "onPreviewObserver called: activeSlotId=%{public}s, activeSurfaceId=%{public}s",
+                activeSlotId.c_str(), activeSurfaceId.c_str());
+
     // 通知所有观察者（而不仅仅是活跃的观察者）
     std::lock_guard<std::mutex> lock(g_observerMutex);
 
+    OH_LOG_INFO(LOG_APP, "Observer callbacks count: %{public}zu", g_observerCallbacks.size());
+
     for (auto& pair : g_observerCallbacks) {
         ObserverCallbackInfo &info = pair.second;
+        OH_LOG_INFO(LOG_APP, "Processing observer: slotId=%{public}s, hasCallback=%{public}d",
+                    info.slotId.c_str(), info.callbackRef != nullptr);
+
         if (!info.callbackRef) {
             continue;
         }
@@ -295,7 +303,8 @@ static void onPreviewObserver(const std::string& activeSlotId, const std::string
         napi_value callback;
         napi_status status = napi_get_reference_value(info.env, info.callbackRef, &callback);
         if (status != napi_ok || !callback) {
-            OH_LOG_WARN(LOG_APP, "Failed to get callback reference for slot: %{public}s", info.slotId.c_str());
+            OH_LOG_WARN(LOG_APP, "Failed to get callback reference for slot: %{public}s, status=%{public}d",
+                        info.slotId.c_str(), status);
             continue;
         }
 
@@ -305,9 +314,14 @@ static void onPreviewObserver(const std::string& activeSlotId, const std::string
 
         napi_value global;
         napi_get_global(info.env, &global);
-        napi_call_function(info.env, global, callback, 2, argv, nullptr);
-        OH_LOG_INFO(LOG_APP, "Observer callback invoked for slot: %{public}s, activeSlot=%{public}s",
-                    info.slotId.c_str(), activeSlotId.c_str());
+        napi_status callStatus = napi_call_function(info.env, global, callback, 2, argv, nullptr);
+        if (callStatus == napi_ok) {
+            OH_LOG_INFO(LOG_APP, "Observer callback invoked successfully for slot: %{public}s, activeSlot=%{public}s",
+                        info.slotId.c_str(), activeSlotId.c_str());
+        } else {
+            OH_LOG_ERROR(LOG_APP, "Failed to invoke observer callback for slot: %{public}s, status=%{public}d",
+                         info.slotId.c_str(), callStatus);
+        }
     }
 }
 
