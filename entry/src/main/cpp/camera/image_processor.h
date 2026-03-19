@@ -6,6 +6,17 @@
 #include <mutex>
 #include <functional>
 #include <string>
+#include <opencv2/opencv.hpp>
+#include "motion_stack.h"
+#include "file_saver.h"
+
+#include "libraw.h"
+#include "libraw_alloc.h"
+#include "libraw_const.h"
+#include "libraw_datastream.h"
+#include "libraw_internal.h"
+#include "libraw_types.h"
+#include "libraw_version.h"
 
 namespace exposhot {
 
@@ -17,7 +28,24 @@ enum class ImageFormat {
     YUV420 = 3,
     RGBA_8888 = 4,
     RAW = 5,
+    RGB48 = 6,
+    BGRA64 = 7
 };
+
+struct MeanRes {
+    float mean_x[2];
+    float mean_y[2];
+};
+
+typedef struct {
+    uint16_t* data;
+    int width;
+    int height;
+    size_t size;
+    int error;
+} Rgb16Raw, Bgra16Raw;
+
+using Frame = std::vector<uint16_t>;
 
 // 处理进度回调
 // currentFrame: 当前处理的帧索引 (1-based)
@@ -71,7 +99,10 @@ public:
     bool decode(void* rawBuffer, size_t rawSize, ImageFormat format,
                 uint8_t** outRgbaBuffer, size_t* outSize,
                 int32_t* outWidth, int32_t* outHeight);
-
+    
+    Bgra16Raw dngToBGRA16(const void *dng_data, size_t dng_size);
+    Frame convertLibRawToBGRA16(libraw_processed_image_t* img);
+    MeanRes MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint16_t width, uint16_t height);
     // ==================== 编码接口 ====================
 
     // 编码 RGBA 为 JPEG

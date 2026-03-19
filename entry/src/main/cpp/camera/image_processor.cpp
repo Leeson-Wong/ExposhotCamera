@@ -62,6 +62,118 @@ bool ImageProcessor::decode(void* rawBuffer, size_t rawSize, ImageFormat format,
     }
 }
 
+// ==================== 解bayer接口 ====================
+Bgra16Raw ImageProcessor::dngToBGRA16(const void *dng_data, size_t dng_size) {
+    LibRaw processor;
+
+    // ── 1. 从内存打开 ──────────────────────────────────────────────────────
+    // open_buffer 不拷贝数据，dng_data 在整个调用期间必须有效
+    int ret = processor.open_buffer(const_cast<void *>(dng_data), dng_size);
+    if (ret != LIBRAW_SUCCESS)
+        throw std::runtime_error(
+            std::string("open_buffer 失败: ") + libraw_strerror(ret));
+
+    // ── 2. 解包 RAW 数据 ───────────────────────────────────────────────────
+    ret = processor.unpack();
+    if (ret != LIBRAW_SUCCESS)
+        throw std::runtime_error(
+            std::string("unpack 失败: ") + libraw_strerror(ret));
+
+    // ── 3. 设置后处理参数（固定 16-bit 线性输出）─────────────────────────
+    libraw_output_params_t &params = processor.imgdata.params;
+    params.output_bps      = 16;   // 16-bit 输出
+    params.gamm[0]         = 0.45;  // 关闭 gamma，保留线性数据
+    params.gamm[1]         = 0.45;
+    params.no_auto_bright  = 1;    // 关闭自动亮度
+    params.use_camera_wb   = 0;    // 使用相机白平衡
+    params.output_color    = 1;    // sRGB 输出色彩空间
+
+    // ── 4. 后处理（去马赛克 + 颜色转换）──────────────────────────────────
+    ret = processor.dcraw_process();
+    if (ret != LIBRAW_SUCCESS)
+        throw std::runtime_error(
+            std::string("dcraw_process 失败: ") + libraw_strerror(ret));
+
+    // ── 5. 取出内存 RGB 图像 ───────────────────────────────────────────────
+    int errcode = LIBRAW_SUCCESS;
+    libraw_processed_image_t *img = processor.dcraw_make_mem_image(&errcode);
+    if (!img || errcode != LIBRAW_SUCCESS)
+    {
+        if (img) LibRaw::dcraw_clear_mem(img);
+        throw std::runtime_error(
+            std::string("dcraw_make_mem_image 失败: ") + libraw_strerror(errcode));
+    }
+    
+    // dcraw_make_mem_image 始终返回 LIBRAW_IMAGE_BITMAP
+    if (img->type != LIBRAW_IMAGE_BITMAP)
+    {
+        LibRaw::dcraw_clear_mem(img);
+        throw std::runtime_error("dcraw_make_mem_image: 返回类型不是 BITMAP");
+    }
+
+    // ── 6. 填充输出结构体，深拷贝像素数据（16-bit，小端序）──────────────
+    Bgra16Raw result;
+    result.width  = img->width;//img->width;
+    result.height = img->height;//img->height;
+    
+    const uint16_t *src = reinterpret_cast<const uint16_t *>(img->data);
+    //result.size = img->data_size;
+//    void* bufferTemp = malloc(result.size);
+//    std::memcpy(bufferTemp, src, result.size);
+//    result.data = (uint16_t*) bufferTemp;
+    
+    Frame resFrame = convertLibRawToBGRA16(img);
+    //std::memcpy(result.data, resFrame.data(), resFrame.size() * 2);
+    result.data = resFrame.data();
+    result.size = resFrame.size()*sizeof(resFrame.at(0));
+    // ── 7. 释放 LibRaw 分配的缓冲区 ───────────────────────────────────────
+    LibRaw::dcraw_clear_mem(img);
+    return result;
+}
+
+const uint8_t CHANNELS_RGBA = 4;
+Frame ImageProcessor::convertLibRawToBGRA16(libraw_processed_image_t* img) {
+    /*if (img->width != width_ || img->height != height_)
+        throw std::runtime_error(
+            "DNG 尺寸与配置不符: " +
+            std::to_string(img->width) + "x" + std::to_string(img->height));*/
+
+    const auto* src = reinterpret_cast<const uint16_t*>(img->data);
+    const int   ch = img->colors;  // 通常为 3（RGB）
+    const int   n = img->width * img->height;
+
+    Frame frame(static_cast<size_t>(n) * CHANNELS_RGBA);
+    for (int i = 0; i < n; ++i) {
+        const uint16_t r = src[i * ch + 0];
+        const uint16_t g = src[i * ch + 1];
+        const uint16_t b = (ch >= 3) ? src[i * ch + 2] : g;
+        frame[i * CHANNELS_RGBA + 0] = b;        // B
+        frame[i * CHANNELS_RGBA + 1] = g;        // G
+        frame[i * CHANNELS_RGBA + 2] = r;        // R
+        frame[i * CHANNELS_RGBA + 3] = 65535;    // A = 完全不透明
+    }
+    return frame;
+}
+
+MeanRes ImageProcessor::MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint16_t width, uint16_t height) {
+    circular_buf_t cir_buf;
+    memset(&cir_buf, 0, sizeof(circular_buf_t));
+
+    // 用两个 uint16_t* 组装数据
+    cir_buf.img_arr[0] = nativeBuffer1;
+    cir_buf.img_arr[1] = nativeBuffer2;
+    cir_buf.cir_size = 2;
+
+    // TODO: 需要根据实际情况设置宽高
+    cir_buf.width = width;
+    cir_buf.height = height;
+
+    MeanRes res;
+
+    motion_analysis_and_stack(cir_buf, res.mean_x, res.mean_y);
+    return res;
+}
+
 bool ImageProcessor::decodeJpeg(void* rawBuffer, size_t rawSize,
                                 uint8_t** outRgbaBuffer, size_t* outSize,
                                 int32_t* outWidth, int32_t* outHeight) {

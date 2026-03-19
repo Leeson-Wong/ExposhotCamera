@@ -1,6 +1,7 @@
 #ifndef EXPO_CAMERA_H
 #define EXPO_CAMERA_H
 
+#include <rawfile/raw_file_manager.h>
 #include <string>
 #include <mutex>
 #include <functional>

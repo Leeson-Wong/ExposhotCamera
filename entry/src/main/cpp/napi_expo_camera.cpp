@@ -6,6 +6,7 @@
 #include "capture_manager.h"
 #include "file_saver.h"
 #include "hilog/log.h"
+#include "image_processor.h"
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -1590,7 +1591,7 @@ static napi_value SetBurstImageSize(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// 模拟堆叠过程（空实现，用于测试 UI 交互）
+// 模拟堆叠过程（读取 RAWFILE 文件到内存，用于测试堆叠功能）
 static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
@@ -1614,27 +1615,142 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "MockStackProcess called: surfaceId=%{public}s, frameIndex=%{public}d",
                 surfaceId.c_str(), frameIndex);
 
-    // 空实现：仅记录日志，模拟堆叠过程
-    // TODO: 实现真实的堆叠逻辑，使用 surfaceId 获取预览帧进行堆叠
+    // 读取本地 RAWFILE 文件到内存
+    // 定义测试用的 DNG 文件列表
+    static const char* RAW_FILE_LIST[] = {
+        "IMG_20260314_010259.dng",
+        "IMG_20260314_010348.dng",
+        "IMG_20260314_010521.dng",
+        "IMG_20260314_010555.dng"
+    };
+    static const int RAW_FILE_COUNT = 4;
 
-    // 注意：不在 NDK 中使用 sleep/usleep，让调用方控制延迟
+    // 获取 NativeResourceManager
+    NativeResourceManager* mgr = OH_ResourceManager_InitNativeResourceManager(env, nullptr);
+    if (mgr == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "Failed to init NativeResourceManager");
 
-    // 返回结果对象
+        napi_value resultObj;
+        napi_create_object(env, &resultObj);
+        napi_value successValue;
+        napi_get_boolean(env, false, &successValue);
+        napi_set_named_property(env, resultObj, "success", successValue);
+        return resultObj;
+    }
+
+    // 根据 frameIndex 选择要读取的文件
+    int fileIndex = frameIndex % RAW_FILE_COUNT;
+    const char* fileName = RAW_FILE_LIST[fileIndex];
+
+    OH_LOG_INFO(LOG_APP, "Reading rawfile: %{public}s (frameIndex=%{public}d, fileIndex=%{public}d)",
+                fileName, frameIndex, fileIndex);
+
+    // 打开 RawFile
+    RawFile* rawFile = OH_ResourceManager_OpenRawFile(mgr, fileName);
+    if (rawFile == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "Failed to open rawfile: %{public}s", fileName);
+        OH_ResourceManager_ReleaseNativeResourceManager(mgr);
+
+        napi_value resultObj;
+        napi_create_object(env, &resultObj);
+        napi_value successValue;
+        napi_get_boolean(env, false, &successValue);
+        napi_set_named_property(env, resultObj, "success", successValue);
+        return resultObj;
+    }
+
+    // 获取文件大小
+    long fileSize = OH_ResourceManager_GetRawFileSize(rawFile);
+    OH_LOG_INFO(LOG_APP, "Rawfile size: %{public}ld bytes", fileSize);
+
+    if (fileSize <= 0) {
+        OH_LOG_ERROR(LOG_APP, "Invalid rawfile size: %{public}ld", fileSize);
+        OH_ResourceManager_CloseRawFile(rawFile);
+        OH_ResourceManager_ReleaseNativeResourceManager(mgr);
+
+        napi_value resultObj;
+        napi_create_object(env, &resultObj);
+        napi_value successValue;
+        napi_get_boolean(env, false, &successValue);
+        napi_set_named_property(env, resultObj, "success", successValue);
+        return resultObj;
+    }
+
+    // 分配内存并读取文件内容
+    void* bufferCopy = malloc((size_t) fileSize);
+    int bytesRead = OH_ResourceManager_ReadRawFile(rawFile, bufferCopy, fileSize);
+
+    OH_LOG_INFO(LOG_APP, "Read %{public}d bytes from rawfile", bytesRead);
+    std::unique_ptr<exposhot::ImageProcessor> processor = std::make_unique<exposhot::ImageProcessor>();
+    
+    exposhot::Bgra16Raw bgra16Raw = processor->dngToBGRA16(bufferCopy, fileSize);
+    
+    std::vector<float> dx {0.0f, 0.0f};
+    std::vector<float> dy {0.0f, 0.0f};
+    
+    // NOTE 从GPU获取已堆叠的结果
+    uint16_t* stackedRes;
+    if (fileIndex != 0) {
+        exposhot::MeanRes res = processor->MotionAnalysisAndStack(stackedRes, bgra16Raw.data, bgra16Raw.width, bgra16Raw.height);
+        dx[0] = res.mean_x[0];
+        dx[1] = res.mean_x[1];
+        dy[0] = res.mean_y[0];
+        dy[1] = res.mean_y[1];
+    }
+    // NOTE 实际处理区域 开始  当前图像信息都在bgra16Raw中偏移量为dx和dy
+    
+    // NOTE 实际处理区域 结束
+    
+    // 关闭文件和资源管理器
+    OH_ResourceManager_CloseRawFile(rawFile);
+    OH_ResourceManager_ReleaseNativeResourceManager(mgr);
+
+    // 创建返回结果对象
     napi_value resultObj;
     napi_create_object(env, &resultObj);
 
+    // 设置 success
     napi_value successValue;
     napi_get_boolean(env, true, &successValue);
     napi_set_named_property(env, resultObj, "success", successValue);
 
+    // 设置 nextFrameIndex
     napi_value frameIndexValue;
     napi_create_int32(env, frameIndex + 1, &frameIndexValue);
     napi_set_named_property(env, resultObj, "nextFrameIndex", frameIndexValue);
 
+    // 设置 message
     napi_value messageValue;
-    std::string msg = "Frame " + std::to_string(frameIndex) + " processed";
+    std::string msg = "Frame " + std::to_string(frameIndex) + " (" + fileName + ") processed, " +
+                      std::to_string(bytesRead) + " bytes read";
     napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &messageValue);
     napi_set_named_property(env, resultObj, "message", messageValue);
+
+    // 设置 fileName
+    napi_value fileNameValue;
+    napi_create_string_utf8(env, fileName, NAPI_AUTO_LENGTH, &fileNameValue);
+    napi_set_named_property(env, resultObj, "fileName", fileNameValue);
+
+    // 设置 fileSize
+    napi_value fileSizeValue;
+    napi_create_int32(env, static_cast<int32_t>(fileSize), &fileSizeValue);
+    napi_set_named_property(env, resultObj, "fileSize", fileSizeValue);
+
+    // 创建并设置 buffer (ArrayBuffer)
+    if (bytesRead > 0) {
+        void* outputData = nullptr;
+        napi_value arrayBuffer = nullptr;
+        napi_status status = napi_create_arraybuffer(env, bytesRead, &outputData, &arrayBuffer);
+
+        if (status == napi_ok && outputData != nullptr) {
+            std::memcpy(outputData, bufferCopy, bytesRead);
+            napi_set_named_property(env, resultObj, "buffer", arrayBuffer);
+
+            OH_LOG_INFO(LOG_APP, "Created ArrayBuffer with %{public}d bytes", bytesRead);
+        } else {
+            OH_LOG_ERROR(LOG_APP, "Failed to create ArrayBuffer");
+        }
+    }
 
     return resultObj;
 }
