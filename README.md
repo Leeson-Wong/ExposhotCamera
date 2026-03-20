@@ -141,7 +141,7 @@ nativeCamera.releaseCamera();
 
 ## 环境要求
 
-- HarmonyOS SDK: 6.0.2(22)+
+- HarmonyOS SDK: 5.1.1(19)+
 - DevEco Studio: 最新版本
 - NDK: r18+
 

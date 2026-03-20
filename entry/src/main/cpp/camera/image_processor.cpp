@@ -177,8 +177,8 @@ MeanRes ImageProcessor::MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t
 }
 
 bool ImageProcessor::decodeJpeg(void* rawBuffer, size_t rawSize,
-                                uint8_t** outRgbaBuffer, size_t* outSize,
-                                int32_t* outWidth, int32_t* outHeight) {
+                    uint8_t** outRgbaBuffer, size_t* outSize,
+                    uint32_t* outWidth, uint32_t* outHeight) {
     if (!rawBuffer || !outWidth || !outHeight) {
         return false;
     }
@@ -282,102 +282,6 @@ bool ImageProcessor::encodeJpeg(uint8_t* rgbaBuffer, size_t rgbaSize,
 bool ImageProcessor::encodePng(uint8_t* rgbaBuffer, size_t rgbaSize,
                                uint32_t width, uint32_t height,
                                void** outPngBuffer, size_t* outPngSize) {
-    // 快速失败：空指针检查
-    if (!rgbaBuffer || rgbaSize == 0) {
-        OH_LOG_ERROR(LOG_APP, "encodePng: null or empty input buffer");
-        return false;
-    }
-    if (!outPngBuffer || !outPngSize) {
-        OH_LOG_ERROR(LOG_APP, "encodePng: null output parameters");
-        return false;
-    }
-
-    // 初始化输出
-    *outPngBuffer = nullptr;
-    *outPngSize = 0;
-
-    // 创建 PixelMap
-    OH_PixelMap_InitializationOpts opts;
-    opts.pixelFormat = IMAGE_PIXEL_FORMAT_RGBA_8888;
-    opts.alphaType = IMAGE_ALPHA_TYPE_OPAQUE;
-    opts.size.width = width;
-    opts.size.height = height;
-
-    OH_PixelMapNative* pixelMap = nullptr;
-    int32_t ret = OH_PixelMap_Native_Create(&opts, &pixelMap);
-    if (ret != IMAGE_SUCCESS || !pixelMap) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create PixelMap for encoding: %{public}d", ret);
-        return false;
-    }
-
-    // 写入像素数据
-    void* pixelData = nullptr;
-    uint32_t capacity = 0;
-    ret = OH_PixelMap_Native_GetPixels(pixelMap, &pixelData, &capacity);
-    if (ret != IMAGE_SUCCESS || !pixelData || capacity < rgbaSize) {
-        OH_LOG_ERROR(LOG_APP, "Failed to get PixelMap buffer: %{public}d, capacity=%{public}u",
-                     ret, capacity);
-        OH_PixelMap_Native_Release(pixelMap);
-        return false;
-    }
-
-    memcpy(pixelData, rgbaBuffer, rgbaSize);
-
-    // 创建 ImagePacker
-    OH_ImagePackerNative* packer = nullptr;
-    ret = OH_ImagePackerNative_Create(&packer);
-    if (ret != IMAGE_SUCCESS || !packer) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create ImagePacker: %{public}d", ret);
-        OH_PixelMap_Native_Release(pixelMap);
-        return false;
-    }
-
-    // 设置 PNG 格式
-    ret = OH_ImagePackerNative_SetFormat(packer, "image/png");
-    if (ret != IMAGE_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "Failed to set PNG format: %{public}d", ret);
-        OH_PixelMap_Native_Release(pixelMap);
-        OH_ImagePackerNative_Release(packer);
-        return false;
-    }
-
-    // 打包 PixelMap
-    ret = OH_ImagePackerNative_PackPixelMap(packer, pixelMap);
-    if (ret != IMAGE_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "Failed to pack PixelMap: %{public}d", ret);
-        OH_PixelMap_Native_Release(pixelMap);
-        OH_ImagePackerNative_Release(packer);
-        return false;
-    }
-
-    // 获取编码后的数据
-    void* pngData = nullptr;
-    size_t pngSize = 0;
-    ret = OH_ImagePackerNative_GetData(packer, &pngData, &pngSize);
-    if (ret != IMAGE_SUCCESS || !pngData || pngSize == 0) {
-        OH_LOG_ERROR(LOG_APP, "Failed to get PNG data: %{public}d", ret);
-        OH_PixelMap_Native_Release(pixelMap);
-        OH_ImagePackerNative_Release(packer);
-        return false;
-    }
-
-    // 分配缓冲区并复制数据
-    *outPngBuffer = malloc(pngSize);
-    if (!*outPngBuffer) {
-        OH_LOG_ERROR(LOG_APP, "Failed to allocate PNG buffer: size=%{public}zu", pngSize);
-        OH_PixelMap_Native_Release(pixelMap);
-        OH_ImagePackerNative_Release(packer);
-        return false;
-    }
-
-    memcpy(*outPngBuffer, pngData, pngSize);
-    *outPngSize = pngSize;
-
-    OH_PixelMap_Native_Release(pixelMap);
-    OH_ImagePackerNative_Release(packer);
-
-    OH_LOG_INFO(LOG_APP, "PNG encode successful: %{public}dx%{public}d, size=%{public}zu",
-                width, height, pngSize);
     return true;
 }
 

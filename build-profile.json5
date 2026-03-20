@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.cer",
+          "certpath": "C:\\Users\\LeesonWong\\.ohos\\config\\default_ExposhotCamera_25FD2hCGXawgMKcenrEjvxKy5FQdjs3SL0wM12ORZok=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B38B9F4D1E95EEF7FE8C5B3AEF7C8C460A282C4C82CFFC5DE1D4063F2FF78C3425AFEFBABDC65A3",
-          "profile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p7b",
+          "keyPassword": "0000001BAA60202B57C0A716E920616E84EAE04230878B0BDB009CD6D6E542CF0519B5C25CA022E254E6D0",
+          "profile": "C:\\Users\\LeesonWong\\.ohos\\config\\default_ExposhotCamera_25FD2hCGXawgMKcenrEjvxKy5FQdjs3SL0wM12ORZok=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\18157\\.ohos\\config\\default_ExposhotCamera_MvClAJV5wjxd5sfpeTVS1w-317c6bTqVq7X2GcNCNe0=.p12",
-          "storePassword": "0000001BE3EFB5E423C4B70B1C2593A04BC7DE3CCC695C8D6E9C60C756EB2517CE3F88C81D2E19BD188048"
+          "storeFile": "C:\\Users\\LeesonWong\\.ohos\\config\\default_ExposhotCamera_25FD2hCGXawgMKcenrEjvxKy5FQdjs3SL0wM12ORZok=.p12",
+          "storePassword": "0000001BEDBF8E8D3FFBBA1BBB9380C9B1A49361C8E2994BFD8420BD77EAF0C7E7348119C2EDEFF437231F"
         }
       }
     ],
@@ -19,8 +19,8 @@
       {
         "name": "default",
         "signingConfig": "default",
-        "targetSdkVersion": "6.0.2(22)",
-        "compatibleSdkVersion": "6.0.2(22)",
+        "targetSdkVersion": "5.1.1(19)",
+        "compatibleSdkVersion": "5.1.1(19)",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
           "strictMode": {

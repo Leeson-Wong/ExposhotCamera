@@ -11,14 +11,73 @@
     "installationFree": false,
     "pages": "$profile:main_pages",
     "requestPermissions": [
+      // [StartExclude permissions_acc]
       {
         "name": "ohos.permission.CAMERA",
-        "reason": "$string:camera_reason",
+        "reason": "$string:permission_CAMERA",
         "usedScene": {
-          "abilities": ["EntryAbility"],
-          "when": "inuse"
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+      // [StartExclude permissions]
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:reason_microphone",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+      {
+        "name": "ohos.permission.MEDIA_LOCATION",
+        "reason": "$string:reason_media_location",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+//      {
+//        "name": "ohos.permission.WRITE_IMAGEVIDEO",
+//        "reason": "$string:reason_write_imagevideo",
+//        "usedScene": {
+//          "abilities": [
+//            "EntryAbility"
+//          ]
+//        }
+//      },
+//      {
+//        "name": "ohos.permission.READ_IMAGEVIDEO",
+//        "reason": "$string:reason_read_imagevideo",
+//        "usedScene": {
+//          "abilities": [
+//            "EntryAbility"
+//          ]
+//        },
+//      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:permission_LOCATION",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+      // [EndExclude permissions_acc]
+      {
+        "name": "ohos.permission.ACCELEROMETER",
+        "reason": "$string:permission_SENSOR",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ]
         }
       }
+      // [EndExclude permissions]
     ],
     "abilities": [
       {
