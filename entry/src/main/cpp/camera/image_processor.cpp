@@ -7,9 +7,11 @@
 #include "opencv2/opencv.hpp"
 
 // HarmonyOS Image Native API
+#include <multimedia/image_framework/image/image_common.h>
 #include <multimedia/image_framework/image/image_native.h>
 #include <multimedia/image_framework/image/image_source_native.h>
 #include <multimedia/image_framework/image/image_packer_native.h>
+#include <multimedia/image_framework/image/pixelmap_native.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -28,7 +30,7 @@ ImageProcessor::~ImageProcessor() {
 
 bool ImageProcessor::decode(void* rawBuffer, size_t rawSize, ImageFormat format,
                             uint8_t** outRgbaBuffer, size_t* outSize,
-                            int32_t* outWidth, int32_t* outHeight) {
+                            uint32_t* outWidth, uint32_t* outHeight) {
     if (!rawBuffer || rawSize == 0 || !outRgbaBuffer || !outSize) {
         OH_LOG_ERROR(LOG_APP, "Invalid decode parameters");
         return false;
@@ -205,7 +207,7 @@ bool ImageProcessor::decodeJpeg(void* rawBuffer, size_t rawSize,
 }
 
 bool ImageProcessor::decodeNv21(void* rawBuffer, size_t rawSize,
-                                int32_t width, int32_t height,
+                                uint32_t width, uint32_t height,
                                 uint8_t** outRgbaBuffer, size_t* outSize) {
     // NV21 格式: YYYYYYY... VUVU...
     // Y 平面: width * height
@@ -260,23 +262,128 @@ bool ImageProcessor::decodeNv21(void* rawBuffer, size_t rawSize,
 // ==================== 编码接口 ====================
 
 bool ImageProcessor::encodeJpeg(uint8_t* rgbaBuffer, size_t rgbaSize,
-                                int32_t width, int32_t height, int32_t quality,
+                                uint32_t width, uint32_t height, int32_t quality,
                                 void** outJpegBuffer, size_t* outJpegSize) {
-    return true;
+    // 快速失败：空指针检查
+    if (!rgbaBuffer || rgbaSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "encodeJpeg: null or empty input buffer");
+        return false;
+    }
+    if (!outJpegBuffer || !outJpegSize) {
+        OH_LOG_ERROR(LOG_APP, "encodeJpeg: null output parameters");
+        return false;
+    }
+
+    // JPEG 编码暂未实现，使用 PNG 代替
+    OH_LOG_ERROR(LOG_APP, "encodeJpeg not implemented, use PNG instead");
+    return false;
 }
 
 bool ImageProcessor::encodePng(uint8_t* rgbaBuffer, size_t rgbaSize,
-                               int32_t width, int32_t height,
+                               uint32_t width, uint32_t height,
                                void** outPngBuffer, size_t* outPngSize) {
-    // TODO: 实现 PNG 编码
-    // 与 encodeJpeg 类似，只需将 format 改为 "image/png"
-    OH_LOG_ERROR(LOG_APP, "encodePng not implemented yet");
-    return false;
+    // 快速失败：空指针检查
+    if (!rgbaBuffer || rgbaSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "encodePng: null or empty input buffer");
+        return false;
+    }
+    if (!outPngBuffer || !outPngSize) {
+        OH_LOG_ERROR(LOG_APP, "encodePng: null output parameters");
+        return false;
+    }
+
+    // 初始化输出
+    *outPngBuffer = nullptr;
+    *outPngSize = 0;
+
+    // 创建 PixelMap
+    OH_PixelMap_InitializationOpts opts;
+    opts.pixelFormat = IMAGE_PIXEL_FORMAT_RGBA_8888;
+    opts.alphaType = IMAGE_ALPHA_TYPE_OPAQUE;
+    opts.size.width = width;
+    opts.size.height = height;
+
+    OH_PixelMapNative* pixelMap = nullptr;
+    int32_t ret = OH_PixelMap_Native_Create(&opts, &pixelMap);
+    if (ret != IMAGE_SUCCESS || !pixelMap) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create PixelMap for encoding: %{public}d", ret);
+        return false;
+    }
+
+    // 写入像素数据
+    void* pixelData = nullptr;
+    uint32_t capacity = 0;
+    ret = OH_PixelMap_Native_GetPixels(pixelMap, &pixelData, &capacity);
+    if (ret != IMAGE_SUCCESS || !pixelData || capacity < rgbaSize) {
+        OH_LOG_ERROR(LOG_APP, "Failed to get PixelMap buffer: %{public}d, capacity=%{public}u",
+                     ret, capacity);
+        OH_PixelMap_Native_Release(pixelMap);
+        return false;
+    }
+
+    memcpy(pixelData, rgbaBuffer, rgbaSize);
+
+    // 创建 ImagePacker
+    OH_ImagePackerNative* packer = nullptr;
+    ret = OH_ImagePackerNative_Create(&packer);
+    if (ret != IMAGE_SUCCESS || !packer) {
+        OH_LOG_ERROR(LOG_APP, "Failed to create ImagePacker: %{public}d", ret);
+        OH_PixelMap_Native_Release(pixelMap);
+        return false;
+    }
+
+    // 设置 PNG 格式
+    ret = OH_ImagePackerNative_SetFormat(packer, "image/png");
+    if (ret != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "Failed to set PNG format: %{public}d", ret);
+        OH_PixelMap_Native_Release(pixelMap);
+        OH_ImagePackerNative_Release(packer);
+        return false;
+    }
+
+    // 打包 PixelMap
+    ret = OH_ImagePackerNative_PackPixelMap(packer, pixelMap);
+    if (ret != IMAGE_SUCCESS) {
+        OH_LOG_ERROR(LOG_APP, "Failed to pack PixelMap: %{public}d", ret);
+        OH_PixelMap_Native_Release(pixelMap);
+        OH_ImagePackerNative_Release(packer);
+        return false;
+    }
+
+    // 获取编码后的数据
+    void* pngData = nullptr;
+    size_t pngSize = 0;
+    ret = OH_ImagePackerNative_GetData(packer, &pngData, &pngSize);
+    if (ret != IMAGE_SUCCESS || !pngData || pngSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "Failed to get PNG data: %{public}d", ret);
+        OH_PixelMap_Native_Release(pixelMap);
+        OH_ImagePackerNative_Release(packer);
+        return false;
+    }
+
+    // 分配缓冲区并复制数据
+    *outPngBuffer = malloc(pngSize);
+    if (!*outPngBuffer) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate PNG buffer: size=%{public}zu", pngSize);
+        OH_PixelMap_Native_Release(pixelMap);
+        OH_ImagePackerNative_Release(packer);
+        return false;
+    }
+
+    memcpy(*outPngBuffer, pngData, pngSize);
+    *outPngSize = pngSize;
+
+    OH_PixelMap_Native_Release(pixelMap);
+    OH_ImagePackerNative_Release(packer);
+
+    OH_LOG_INFO(LOG_APP, "PNG encode successful: %{public}dx%{public}d, size=%{public}zu",
+                width, height, pngSize);
+    return true;
 }
 
 // ==================== 堆叠接口 ====================
 
-bool ImageProcessor::initStacking(int32_t totalFrames, int32_t width, int32_t height) {
+bool ImageProcessor::initStacking(int32_t totalFrames, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (initialized_) {
@@ -317,8 +424,14 @@ bool ImageProcessor::initStacking(int32_t totalFrames, int32_t width, int32_t he
 }
 
 bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t rawSize,
-                                  int32_t width, int32_t height, ImageFormat format, bool isFirst) {
+                                  uint32_t width, uint32_t height, ImageFormat format, bool isFirst) {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // 快速失败：空指针检查
+    if (!rawBuffer || rawSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "processFrame: null or empty input buffer");
+        return false;
+    }
 
     if (!initialized_) {
         OH_LOG_ERROR(LOG_APP, "Session not initialized");
@@ -331,10 +444,21 @@ bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t ra
     // 1. 解码原始图像为 RGBA
     uint8_t* rgbaBuffer = nullptr;
     size_t rgbaSize = 0;
-    int32_t decodedWidth = 0, decodedHeight = 0;
+    uint32_t decodedWidth = 0, decodedHeight = 0;
 
     if (!decode(rawBuffer, rawSize, format, &rgbaBuffer, &rgbaSize, &decodedWidth, &decodedHeight)) {
         OH_LOG_ERROR(LOG_APP, "Failed to decode image for frame %{public}d", frameIndex);
+        return false;
+    }
+
+    // 快速失败：验证解码结果
+    if (!rgbaBuffer) {
+        OH_LOG_ERROR(LOG_APP, "decode succeeded but returned null buffer");
+        return false;
+    }
+    if (rgbaSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "decode succeeded but returned zero size");
+        free(rgbaBuffer);
         return false;
     }
 
@@ -358,8 +482,19 @@ bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t ra
 bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // 快速失败：空指针检查
+    if (!outBuffer || !outSize) {
+        OH_LOG_ERROR(LOG_APP, "getCurrentResult: null output parameters");
+        return false;
+    }
+
     if (!initialized_ || processedFrames_ == 0) {
         OH_LOG_ERROR(LOG_APP, "Not initialized or no frames processed");
+        return false;
+    }
+
+    if (!rgbaBuffer_ || !accumulateBuffer_) {
+        OH_LOG_ERROR(LOG_APP, "getCurrentResult: null internal buffers");
         return false;
     }
 
@@ -374,9 +509,9 @@ bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
         rgbaBuffer_[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, value)));
     }
 
-    // 编码为 JPEG
-    return encodeJpeg(rgbaBuffer_, static_cast<size_t>(width_) * height_ * 4,
-                      width_, height_, 90, outBuffer, outSize);
+    // 编码为 PNG（使用已实现的 PNG 编码）
+    return encodePng(rgbaBuffer_, static_cast<size_t>(width_) * height_ * 4,
+                     width_, height_, outBuffer, outSize);
 }
 
 bool ImageProcessor::finalize(void** outBuffer, size_t* outSize) {
@@ -412,6 +547,20 @@ void ImageProcessor::reset() {
 }
 
 bool ImageProcessor::stackFrame(uint8_t* rgbaBuffer, bool isFirst) {
+    // 快速失败：空指针检查
+    if (!rgbaBuffer) {
+        OH_LOG_ERROR(LOG_APP, "stackFrame: null rgbaBuffer");
+        return false;
+    }
+    if (!accumulateBuffer_) {
+        OH_LOG_ERROR(LOG_APP, "stackFrame: null accumulateBuffer_");
+        return false;
+    }
+    if (width_ <= 0 || height_ <= 0) {
+        OH_LOG_ERROR(LOG_APP, "stackFrame: invalid dimensions %{public}dx%{public}d", width_, height_);
+        return false;
+    }
+
     int32_t pixelCount = width_ * height_ * 4;  // RGBA
 
     if (isFirst) {
