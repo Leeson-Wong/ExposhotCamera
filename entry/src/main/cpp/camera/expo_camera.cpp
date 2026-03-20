@@ -256,6 +256,21 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
         return err;
     }
 
+    // 重新设置默认对焦模式和曝光模式（session 重启后需要重新设置）
+    bool focusModeSupported = false;
+    err = OH_CaptureSession_IsFocusModeSupported(captureSession_,
+        Camera_FocusMode::FOCUS_MODE_CONTINUOUS_AUTO, &focusModeSupported);
+    if (err == CAMERA_OK && focusModeSupported) {
+        OH_CaptureSession_SetFocusMode(captureSession_, Camera_FocusMode::FOCUS_MODE_CONTINUOUS_AUTO);
+    }
+
+    bool exposureModeSupported = false;
+    err = OH_CaptureSession_IsExposureModeSupported(captureSession_,
+        Camera_ExposureMode::EXPOSURE_MODE_CONTINUOUS_AUTO, &exposureModeSupported);
+    if (err == CAMERA_OK && exposureModeSupported) {
+        OH_CaptureSession_SetExposureMode(captureSession_, Camera_ExposureMode::EXPOSURE_MODE_CONTINUOUS_AUTO);
+    }
+
     activeSurfaceId_ = surfaceId;
     OH_LOG_INFO(LOG_APP, "Surface switched successfully to %{public}s", surfaceId.c_str());
     return CAMERA_OK;
@@ -355,6 +370,36 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     // 注意：OH_CaptureSession_Start() 已启动预览流
     // OH_PreviewOutput_Start() 仅用于 Session 运行中单独恢复预览的场景
     // 初始化时调用会导致 CAMERA_SERVICE_FATAL_ERROR
+
+    // 设置默认对焦模式为连续自动对焦
+    bool focusModeSupported = false;
+    err = OH_CaptureSession_IsFocusModeSupported(captureSession_,
+        Camera_FocusMode::FOCUS_MODE_CONTINUOUS_AUTO, &focusModeSupported);
+    if (err == CAMERA_OK && focusModeSupported) {
+        err = OH_CaptureSession_SetFocusMode(captureSession_, Camera_FocusMode::FOCUS_MODE_CONTINUOUS_AUTO);
+        if (err == CAMERA_OK) {
+            OH_LOG_INFO(LOG_APP, "Default focus mode set to CONTINUOUS_AUTO");
+        } else {
+            OH_LOG_WARN(LOG_APP, "Failed to set default focus mode: %{public}d", err);
+        }
+    } else {
+        OH_LOG_WARN(LOG_APP, "CONTINUOUS_AUTO focus mode not supported");
+    }
+
+    // 设置默认曝光模式为连续自动曝光
+    bool exposureModeSupported = false;
+    err = OH_CaptureSession_IsExposureModeSupported(captureSession_,
+        Camera_ExposureMode::EXPOSURE_MODE_CONTINUOUS_AUTO, &exposureModeSupported);
+    if (err == CAMERA_OK && exposureModeSupported) {
+        err = OH_CaptureSession_SetExposureMode(captureSession_, Camera_ExposureMode::EXPOSURE_MODE_CONTINUOUS_AUTO);
+        if (err == CAMERA_OK) {
+            OH_LOG_INFO(LOG_APP, "Default exposure mode set to CONTINUOUS_AUTO");
+        } else {
+            OH_LOG_WARN(LOG_APP, "Failed to set default exposure mode: %{public}d", err);
+        }
+    } else {
+        OH_LOG_WARN(LOG_APP, "CONTINUOUS_AUTO exposure mode not supported");
+    }
 
     activeSurfaceId_ = surfaceId;
     previewing_ = true;

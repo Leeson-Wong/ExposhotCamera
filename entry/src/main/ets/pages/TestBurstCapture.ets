@@ -22,12 +22,18 @@ struct TestBurstCapture {
   @State processedCount: number = 0;
   @State progressMessage: string = '';
 
+  // 延迟拍摄控制
+  @State delaySeconds: number = 2;  // 延迟秒数，0 表示无延迟
+  @State countdown: number = 0;     // 当前倒计时
+  @State isCountingDown: boolean = false;  // 是否正在倒计时
+
   // 缩略图列表（用于存储中间预览图）
   @State thumbnailList: PixelMap[] = [];
   // 最终堆叠结果
   @State finalImage?: PixelMap = undefined;
 
   private xComponentController: XComponentController = new XComponentController();
+  private countdownTimer: number = -1;  // 倒计时定时器 ID
 
   aboutToAppear(): void {
     nativeCamera.registerImageDataCallback(this.processPhotoBufferWrapper);
@@ -47,6 +53,12 @@ struct TestBurstCapture {
   }
 
   aboutToDisappear(): void {
+    // 清除倒计时定时器
+    if (this.countdownTimer !== -1) {
+      clearTimeout(this.countdownTimer);
+      this.countdownTimer = -1;
+    }
+
     if (this.slotId) {
       nativeCamera.unregisterObserver(this.slotId);
     }
@@ -183,6 +195,64 @@ struct TestBurstCapture {
     this.isCapturing = false;
   }
 
+  // 开始延迟拍摄
+  startDelayedCapture(): void {
+    if (!this.photoReady || this.isCapturing || this.isCountingDown) {
+      hilog.warn(DOMAIN, TAG, 'Cannot start delayed capture');
+      return;
+    }
+
+    // 如果延迟时间为 0，直接开始拍摄
+    if (this.delaySeconds === 0) {
+      this.startBurstCapture();
+      return;
+    }
+
+    // 开始倒计时
+    this.isCountingDown = true;
+    this.countdown = this.delaySeconds;
+    this.cameraStatus = `倒计时: ${this.countdown} 秒`;
+    hilog.info(DOMAIN, TAG, 'Starting countdown: %{public}d seconds', this.delaySeconds);
+
+    this.countdownTimer = setInterval(() => {
+      this.countdown--;
+      if (this.countdown > 0) {
+        this.cameraStatus = `倒计时: ${this.countdown} 秒`;
+        hilog.info(DOMAIN, TAG, 'Countdown: %{public}d', this.countdown);
+      } else {
+        // 倒计时结束，清除定时器并开始拍摄
+        this.stopCountdown();
+        this.cameraStatus = '开始拍摄!';
+        this.startBurstCapture();
+      }
+    }, 1000);
+  }
+
+  // 停止倒计时
+  stopCountdown(): void {
+    if (this.countdownTimer !== -1) {
+      clearInterval(this.countdownTimer);
+      this.countdownTimer = -1;
+    }
+    this.isCountingDown = false;
+    this.countdown = 0;
+    if (!this.isCapturing) {
+      this.cameraStatus = '已取消';
+    }
+  }
+
+  // 取消拍摄（包括倒计时和正在进行的拍摄）
+  cancelCapture(): void {
+    if (this.isCountingDown) {
+      this.stopCountdown();
+      hilog.info(DOMAIN, TAG, 'Countdown cancelled');
+    }
+    if (this.isCapturing) {
+      this.stopBurstCapture();
+      hilog.info(DOMAIN, TAG, 'Burst capture cancelled');
+    }
+  }
+
   clearThumbnails(): void {
     this.thumbnailList = [];
     this.finalImage = undefined;
@@ -247,6 +317,21 @@ struct TestBurstCapture {
         .justifyContent(FlexAlign.Start)
         .alignItems(HorizontalAlign.Center)
         .padding({ top: 16 })
+
+        // 倒计时大字显示
+        if (this.isCountingDown) {
+          Column() {
+            Text(`${this.countdown}`)
+              .fontSize(120)
+              .fontColor(Color.White)
+              .fontWeight(FontWeight.Bold)
+              .textShadow({ radius: 10, color: '#80000000', offsetX: 0, offsetY: 0 })
+          }
+          .width('100%')
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+        }
 
         // 连拍指示器
         if (this.isCapturing) {
@@ -347,6 +432,52 @@ struct TestBurstCapture {
       .backgroundColor('#80000000')
       .justifyContent(FlexAlign.Center)
 
+      // 延迟时间设置
+      Row() {
+        Text('延迟拍摄(秒):')
+          .fontSize(14)
+          .fontColor(Color.White)
+
+        Button('-')
+          .fontSize(14)
+          .width(32)
+          .height(32)
+          .backgroundColor('#666666')
+          .enabled(this.delaySeconds > 0)
+          .onClick(() => {
+            if (this.delaySeconds > 0) {
+              this.delaySeconds--;
+            }
+          })
+
+        Text(this.delaySeconds === 0 ? '关' : `${this.delaySeconds}`)
+          .fontSize(16)
+          .fontColor(Color.White)
+          .width(40)
+          .textAlign(TextAlign.Center)
+
+        Button('+')
+          .fontSize(14)
+          .width(32)
+          .height(32)
+          .backgroundColor('#666666')
+          .enabled(this.delaySeconds < 10)
+          .onClick(() => {
+            if (this.delaySeconds < 10) {
+              this.delaySeconds++;
+            }
+          })
+
+        Text('(0=立即拍摄)')
+          .fontSize(12)
+          .fontColor(Color.Gray)
+          .margin({ left: 8 })
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+      .backgroundColor('#80000000')
+      .justifyContent(FlexAlign.Center)
+
       // 最终堆叠结果
       if (this.finalImage) {
         Row() {
@@ -404,22 +535,22 @@ struct TestBurstCapture {
             this.clearThumbnails();
           })
 
-        if (this.isCapturing) {
-          Button('停止')
+        if (this.isCapturing || this.isCountingDown) {
+          Button('取消')
             .fontSize(14)
             .width('65%')
             .backgroundColor('#FF0000')
             .onClick(() => {
-              this.stopBurstCapture();
+              this.cancelCapture();
             })
         } else {
-          Button('开始连拍')
+          Button(this.delaySeconds > 0 ? `延迟 ${this.delaySeconds}s 拍摄` : '开始连拍')
             .fontSize(14)
             .width('65%')
             .enabled(this.photoReady)
             .backgroundColor(this.photoReady ? '#007DFF' : '#666666')
             .onClick(() => {
-              this.startBurstCapture();
+              this.startDelayedCapture();
             })
         }
       }
