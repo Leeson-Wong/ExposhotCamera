@@ -39,8 +39,8 @@ struct MeanRes {
 
 typedef struct {
     uint16_t* data;
-    int width;
-    int height;
+    uint32_t width;
+    uint32_t height;
     size_t size;
     int error;
 } Rgb16Raw, Bgra16Raw;
@@ -101,7 +101,7 @@ public:
                 uint32_t* outWidth, uint32_t* outHeight);
     Bgra16Raw dngToBGRA16(const void *dng_data, size_t dng_size);
     Frame convertLibRawToBGRA16(libraw_processed_image_t* img);
-    MeanRes MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint16_t width, uint16_t height);
+    MeanRes MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint32_t width, uint32_t height);
     // ==================== 编码接口 ====================
 
     // 编码 RGBA 为 JPEG

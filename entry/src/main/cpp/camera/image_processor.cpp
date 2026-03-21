@@ -157,7 +157,15 @@ Frame ImageProcessor::convertLibRawToBGRA16(libraw_processed_image_t* img) {
     return frame;
 }
 
-MeanRes ImageProcessor::MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint16_t width, uint16_t height) {
+MeanRes ImageProcessor::MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint32_t width, uint32_t height) {
+    // 边界检查：第三方库 motion_stack 使用 uint16_t，最大支持 65535
+    if (width > UINT16_MAX || height > UINT16_MAX) {
+        OH_LOG_ERROR(LOG_APP, "MotionAnalysisAndStack: dimension exceeds uint16_t limit (%{public}u x %{public}u)",
+                     width, height);
+        MeanRes emptyRes = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+        return emptyRes;
+    }
+
     circular_buf_t cir_buf;
     memset(&cir_buf, 0, sizeof(circular_buf_t));
 
@@ -166,9 +174,8 @@ MeanRes ImageProcessor::MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t
     cir_buf.img_arr[1] = nativeBuffer2;
     cir_buf.cir_size = 2;
 
-    // TODO: 需要根据实际情况设置宽高
-    cir_buf.width = width;
-    cir_buf.height = height;
+    cir_buf.width = static_cast<uint16_t>(width);
+    cir_buf.height = static_cast<uint16_t>(height);
 
     MeanRes res;
 

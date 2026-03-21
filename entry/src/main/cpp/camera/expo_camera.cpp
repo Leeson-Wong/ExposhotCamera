@@ -559,13 +559,17 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
         // 统一传递给 CaptureManager 处理
         auto& captureManager = exposhot::CaptureManager::getInstance();
 
+        // 转换尺寸类型（HarmonyOS API 返回 int32_t，内部使用 uint32_t）
+        uint32_t imgWidth = static_cast<uint32_t>(size.width);
+        uint32_t imgHeight = static_cast<uint32_t>(size.height);
+
         // 检查当前是单拍还是连拍模式
         if (captureManager.isBurstActive()) {
             // 连拍模式
-            captureManager.onBurstPhotoCaptured(bufferCopy, nativeBufferSize, size.width, size.height);
+            captureManager.onBurstPhotoCaptured(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
         } else {
             // 单拍模式
-            captureManager.onSinglePhotoCaptured(bufferCopy, nativeBufferSize, size.width, size.height);
+            captureManager.onSinglePhotoCaptured(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
         }
     } else {
         OH_LOG_ERROR(LOG_APP, "Failed to allocate buffer for photo copy");

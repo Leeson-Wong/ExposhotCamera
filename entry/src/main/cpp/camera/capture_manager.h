@@ -61,7 +61,7 @@ using BurstImageCallback = std::function<void(const std::string& sessionId, void
 // buffer: 原始图像数据(调用者负责 free)
 // size: 数据大小
 // width, height: 图像尺寸
-using SinglePhotoCallback = std::function<void(const std::string& sessionId, void* buffer, size_t size, int32_t width, int32_t height)>;
+using SinglePhotoCallback = std::function<void(const std::string& sessionId, void* buffer, size_t size, uint32_t width, uint32_t height)>;
 
 // 拍照失败回调（异步通知相机硬件错误）
 // 仅用于拍照过程中的硬件错误，触发失败直接通过返回值返回错误码
@@ -135,7 +135,7 @@ public:
     int32_t captureSingle(std::string& outSessionId);
 
     // 单次拍照数据回调（由 ExpoCamera 调用）
-    void onSinglePhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
+    void onSinglePhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height);
 
     // 拍照错误通知（由 ExpoCamera 调用，异步通知相机硬件错误）
     void onPhotoError(int32_t errorCode);
@@ -155,7 +155,7 @@ public:
     // buffer: 原始图像数据（格式取决于相机输出）
     // size: 数据大小
     // width, height: 图像尺寸
-    void onBurstPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
+    void onBurstPhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height);
 
     // ==================== 状态查询 ====================
 
@@ -170,7 +170,7 @@ public:
     bool isBurstActive() const;
 
     // 设置图像尺寸(从第一帧获取)
-    void setImageSize(int32_t width, int32_t height) {
+    void setImageSize(uint32_t width, uint32_t height) {
         imageWidth_ = width;
         imageHeight_ = height;
     }
@@ -205,8 +205,8 @@ private:
     std::atomic<int32_t> processCount_{0};
 
     // 图像尺寸
-    int32_t imageWidth_ = 4032;
-    int32_t imageHeight_ = 3024;
+    uint32_t imageWidth_ = 4032;
+    uint32_t imageHeight_ = 3024;
 
     // 任务队列
     std::unique_ptr<TaskQueue> taskQueue_;

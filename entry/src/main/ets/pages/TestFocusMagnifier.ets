@@ -12,6 +12,7 @@ const MAGNIFIER_SIZE = 180;           // 放大镜直径
 const MAGNIFIER_ZOOM = 2.0;           // 放大倍数
 const MAGNIFIER_BORDER_WIDTH = 3;     // 边框宽度
 const MAGNIFIER_DURATION = 2000;      // 显示时长(ms)
+const MAGNIFIER_UPDATE_INTERVAL = 100; // 内容更新间隔(ms)
 
 @Entry
 @Component
@@ -36,6 +37,7 @@ struct TestFocusMagnifier {
   private xComponentController: XComponentController = new XComponentController();
   private previewStackId: string = 'previewStack';
   private magnifierTimer: number = -1;
+  private magnifierUpdateTimer: number = -1;  // 放大镜内容更新定时器
   private previewWidth: number = 0;
   private previewHeight: number = 0;
 
@@ -61,6 +63,9 @@ struct TestFocusMagnifier {
   aboutToDisappear(): void {
     if (this.magnifierTimer !== -1) {
       clearTimeout(this.magnifierTimer);
+    }
+    if (this.magnifierUpdateTimer !== -1) {
+      clearInterval(this.magnifierUpdateTimer);
     }
     if (this.slotId) {
       nativeCamera.unregisterObserver(this.slotId);
@@ -134,6 +139,14 @@ struct TestFocusMagnifier {
     if (this.magnifierTimer !== -1) {
       clearTimeout(this.magnifierTimer);
     }
+    if (this.magnifierUpdateTimer !== -1) {
+      clearInterval(this.magnifierUpdateTimer);
+    }
+
+    // 启动放大镜内容更新定时器
+    this.magnifierUpdateTimer = setInterval(() => {
+      this.updateMagnifierContent();
+    }, MAGNIFIER_UPDATE_INTERVAL);
 
     // 设置自动隐藏
     this.magnifierTimer = setTimeout(() => {
@@ -232,7 +245,88 @@ struct TestFocusMagnifier {
     this.showMagnifier = false;
     this.focusAnimating = false;
     this.magnifierPixelMap = undefined;
+    // 清除更新定时器
+    if (this.magnifierUpdateTimer !== -1) {
+      clearInterval(this.magnifierUpdateTimer);
+      this.magnifierUpdateTimer = -1;
+    }
     hilog.info(DOMAIN, TAG, 'Magnifier hidden');
+  }
+
+  // 更新放大镜内容（实时跟随预览流）
+  async updateMagnifierContent(): Promise<void> {
+    if (!this.showMagnifier) {
+      return;
+    }
+    try {
+      // 暂时隐藏放大镜，避免截图时包含放大镜本身造成递归放大
+      const savedPixelMap = this.magnifierPixelMap;
+      this.showMagnifier = false;
+
+      // 等待一帧渲染
+      await new Promise<void>(resolve => setTimeout(resolve, 16));
+
+      const snapshot = await componentSnapshot.get(this.previewStackId);
+
+      // 恢复显示（用旧图像先占位，处理完后会替换）
+      this.magnifierPixelMap = savedPixelMap;
+      this.showMagnifier = true;
+
+      if (!snapshot) {
+        return;
+      }
+
+      const cropSize = MAGNIFIER_SIZE / MAGNIFIER_ZOOM;
+      const cropX = Math.max(0, Math.min(this.magnifierX - cropSize / 2, this.previewWidth - cropSize));
+      const cropY = Math.max(0, Math.min(this.magnifierY - cropSize / 2, this.previewHeight - cropSize));
+
+      const imageInfo = await snapshot.getImageInfo();
+      const scaleX = imageInfo.size.width / this.previewWidth;
+      const scaleY = imageInfo.size.height / this.previewHeight;
+
+      const actualCropX = cropX * scaleX;
+      const actualCropY = cropY * scaleY;
+      const actualCropSize = cropSize * scaleX;
+
+      const pixelMapNumber = imageInfo.size.width * imageInfo.size.height * 4;
+      const readBuffer = new ArrayBuffer(pixelMapNumber);
+      await snapshot.readPixelsToBuffer(readBuffer);
+
+      const cropBufferSize = Math.ceil(actualCropSize) * Math.ceil(actualCropSize) * 4;
+      const cropBuffer = new ArrayBuffer(cropBufferSize);
+
+      const srcWidth = imageInfo.size.width;
+      const cropW = Math.ceil(actualCropSize);
+      const cropH = Math.ceil(actualCropSize);
+      const srcX = Math.floor(actualCropX);
+      const srcY = Math.floor(actualCropY);
+
+      const srcView = new Uint8Array(readBuffer);
+      const dstView = new Uint8Array(cropBuffer);
+
+      for (let row = 0; row < cropH; row++) {
+        for (let col = 0; col < cropW; col++) {
+          const srcIdx = ((srcY + row) * srcWidth + (srcX + col)) * 4;
+          const dstIdx = (row * cropW + col) * 4;
+          if (srcIdx + 3 < srcView.length && dstIdx + 3 < dstView.length) {
+            dstView[dstIdx] = srcView[srcIdx];
+            dstView[dstIdx + 1] = srcView[srcIdx + 1];
+            dstView[dstIdx + 2] = srcView[srcIdx + 2];
+            dstView[dstIdx + 3] = srcView[srcIdx + 3];
+          }
+        }
+      }
+
+      const croppedPixelMap = await image.createPixelMap(cropBuffer, {
+        size: { width: cropW, height: cropH },
+        pixelFormat: image.PixelMapFormat.RGBA_8888
+      });
+
+      await croppedPixelMap.scale(MAGNIFIER_ZOOM, MAGNIFIER_ZOOM);
+      this.magnifierPixelMap = croppedPixelMap;
+    } catch (error) {
+      // 静默失败，避免频繁日志
+    }
   }
 
   build() {
@@ -304,7 +398,7 @@ struct TestFocusMagnifier {
               // 按下时显示放大镜并设置对焦点
               this.handleTouch(touch.x, touch.y);
             } else if (event.type === TouchType.Move) {
-              // 移动时更新放大镜位置（不重新截图，只更新位置）
+              // 移动时更新放大镜位置（内容由定时器自动更新）
               if (this.showMagnifier) {
                 this.magnifierX = touch.x;
                 this.magnifierY = touch.y;

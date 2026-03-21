@@ -645,7 +645,62 @@ static void onPreviewObserver(...) {
 
 ---
 
-## 10. 依赖
+## 10. 数据类型规范
+
+### 10.1 图像尺寸类型选择
+
+项目中图像的宽度和高度统一使用 `uint32_t` 类型。
+
+**选择理由：**
+
+1. **基本需求满足**：`uint16_t`（最大 65535）对于当前所有实际分辨率已经足够
+   - 4K 手机相机：4032 × 3024
+   - 8K 分辨率：7680 × 4320
+   - 16K 分辨率：15360 × 8640
+
+2. **保留冗余**：使用 `uint32_t` 提供更大的安全边界，避免边界情况下的溢出风险
+
+3. **性能影响可忽略**：在 32/64 位系统上，`uint32_t` 与 `uint16_t` 的运算性能差异几乎为零
+
+4. **与 HarmonyOS API 对齐**：虽然 HarmonyOS 的 `Image_Size` 使用 `int32_t`，但宽高不可能为负数，内部统一使用 `uint32_t` 更符合语义
+
+### 10.2 类型转换边界
+
+```
+HarmonyOS API (int32_t)
+    ↓ static_cast<uint32_t>
+CaptureManager (uint32_t)
+    ↓
+ImageTask (uint32_t)
+    ↓
+ImageProcessor (uint32_t)
+    ↓ static_cast<uint16_t> + 边界检查
+motion_stack 第三方库 (uint16_t)
+    ↓
+NAPI 回调 (napi_create_uint32) → JavaScript
+```
+
+### 10.3 第三方库边界检查
+
+调用第三方库 `motion_stack` 时，需要将 `uint32_t` 转换为 `uint16_t`。虽然实际值不会超出范围，但仍保留边界检查以防御异常情况：
+
+```cpp
+MeanRes ImageProcessor::MotionAnalysisAndStack(..., uint32_t width, uint32_t height) {
+    // 边界检查：第三方库 motion_stack 使用 uint16_t，最大支持 65535
+    if (width > UINT16_MAX || height > UINT16_MAX) {
+        OH_LOG_ERROR(LOG_APP, "MotionAnalysisAndStack: dimension exceeds uint16_t limit");
+        return emptyRes;
+    }
+
+    cir_buf.width = static_cast<uint16_t>(width);
+    cir_buf.height = static_cast<uint16_t>(height);
+    // ...
+}
+```
+
+---
+
+## 11. 依赖
 
 ```cmake
 target_link_libraries(entry PUBLIC

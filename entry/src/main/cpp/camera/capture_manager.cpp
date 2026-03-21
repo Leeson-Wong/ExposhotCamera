@@ -163,7 +163,7 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     return 0;  // 成功
 }
 
-void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height) {
+void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (state_.load() != CaptureState::SINGLE_CAPTURING) {
@@ -172,7 +172,7 @@ void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, int32_t wi
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "Single photo captured: sessionId=%{public}s, size=%{public}zu, %{public}dx%{public}d",
+    OH_LOG_INFO(LOG_APP, "Single photo captured: sessionId=%{public}s, size=%{public}zu, %{public}ux%{public}u",
                 currentSessionId_.c_str(), size, width, height);
 
     // 通知拍照结束事件
@@ -308,7 +308,7 @@ void CaptureManager::cancelBurst() {
     OH_LOG_INFO(LOG_APP, "Burst cancelled");
 }
 
-void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height) {
+void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
     if (state_.load() == CaptureState::CANCELLED) {
         OH_LOG_INFO(LOG_APP, "Burst cancelled, ignoring captured photo");
         return;
@@ -327,7 +327,7 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, int32_t wid
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "Photo captured: frame %{public}d/%{public}d, size=%{public}zu, %{public}dx%{public}d",
+    OH_LOG_INFO(LOG_APP, "Photo captured: frame %{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
                 frameIndex + 1, config_.frameCount, size, width, height);
 
     // 复制 buffer

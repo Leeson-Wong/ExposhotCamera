@@ -16,8 +16,8 @@ struct ImageTask {
     int32_t taskId;           // 任务 ID（第几张, 0-based)
     void* buffer;             // 图像数据(所有权转移)
     size_t size;              // 数据大小
-    int32_t width;            // 图像宽度
-    int32_t height;           // 图像高度
+    uint32_t width;           // 图像宽度
+    uint32_t height;          // 图像高度
     bool isFirst;             // 是否是第一张(基准帧)
 
     ImageTask() : taskId(0), buffer(nullptr), size(0), width(0), height(0), isFirst(false) {}

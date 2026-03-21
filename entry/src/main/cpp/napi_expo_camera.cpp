@@ -70,12 +70,12 @@ struct PhotoCallbackData {
     std::string sessionId;
     void* buffer;
     size_t size;
-    int32_t width;
-    int32_t height;
+    uint32_t width;
+    uint32_t height;
 };
 
 // 保存照片数据，用于回调（使用异步工作队列）
-static void onPhotoData(const std::string& sessionId, void* buffer, size_t size, int32_t width, int32_t height) {
+static void onPhotoData(const std::string& sessionId, void* buffer, size_t size, uint32_t width, uint32_t height) {
     if (!buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Invalid buffer in onPhotoData");
         return;
@@ -98,7 +98,7 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu, %{public}dx%{public}d",
+    OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu, %{public}ux%{public}u",
                 sessionId.c_str(), size, width, height);
 
     // 复制 buffer 数据
@@ -161,11 +161,11 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
 
                 // 设置 width 和 height
                 napi_value widthValue;
-                napi_create_int32(envLocal, callbackData->width, &widthValue);
+                napi_create_uint32(envLocal, callbackData->width, &widthValue);
                 napi_set_named_property(envLocal, imageDataObj, "width", widthValue);
 
                 napi_value heightValue;
-                napi_create_int32(envLocal, callbackData->height, &heightValue);
+                napi_create_uint32(envLocal, callbackData->height, &heightValue);
                 napi_set_named_property(envLocal, imageDataObj, "height", heightValue);
 
                 // 设置 isFinal (单次拍照始终为 true)
@@ -1373,8 +1373,8 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
 }
 typedef struct {
     uint16_t* data; // RGB 数据 格式：R G B R G B  ......
-    int width;
-    int height;
+    uint32_t width;
+    uint32_t height;
     size_t size;
     int error;
 } Rgb16Result;
@@ -1584,7 +1584,8 @@ static napi_value SetBurstImageSize(napi_env env, napi_callback_info info) {
         napi_get_value_int32(env, args[1], &height);
     }
 
-    exposhot::CaptureManager::getInstance().setImageSize(width, height);
+    exposhot::CaptureManager::getInstance().setImageSize(
+        static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 
     napi_value result;
     napi_get_undefined(env, &result);
