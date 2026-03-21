@@ -36,7 +36,8 @@ struct TestBurstCapture {
   private countdownTimer: number = -1;  // 倒计时定时器 ID
 
   aboutToAppear(): void {
-    nativeCamera.registerImageDataCallback(this.processPhotoBufferWrapper);
+    // 连拍模式使用 startBurstCapture 的回调参数接收图像，不需要注册全局回调
+    // nativeCamera.registerImageDataCallback 仅用于单次拍照 (takePhoto)
 
     nativeCamera.subscribeState((state: string, message: string) => {
       hilog.info(DOMAIN, TAG, 'Camera state: %{public}s, message: %{public}s', state, message);
@@ -90,14 +91,7 @@ struct TestBurstCapture {
     return slotId;
   }
 
-  processPhotoBufferWrapper = (data: nativeCamera.ImageData) => {
-    // 单次拍照模式（非连拍）
-    if (!data.buffer) {
-      return;
-    }
-    this.processPhotoBuffer(data.buffer, data.isFinal);
-  }
-
+  // 处理连拍图像（中间预览 + 最终结果）
   async processPhotoBuffer(buffer: ArrayBuffer, isFinal: boolean): Promise<void> {
     try {
       const imageSource = image.createImageSource(buffer);
