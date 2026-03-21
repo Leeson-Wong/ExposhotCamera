@@ -194,6 +194,10 @@ private:
     // 临时 RGBA 缓冲区
     uint8_t* rgbaBuffer_ = nullptr;
 
+    // TODO: 临时 - 用于直接透传原始 buffer（调试流程编排）
+    void* passthroughBuffer_ = nullptr;
+    size_t passthroughSize_ = 0;
+
     // 回调
     ProcessProgressCallback progressCallback_;
     ProcessStateCallback stateCallback_;

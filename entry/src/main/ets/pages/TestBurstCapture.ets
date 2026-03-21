@@ -59,6 +59,12 @@ struct TestBurstCapture {
       this.countdownTimer = -1;
     }
 
+    // 取消连拍（防止页面销毁后回调继续执行）
+    if (this.isCapturing) {
+      nativeCamera.cancelBurstCapture();
+      this.isCapturing = false;
+    }
+
     if (this.slotId) {
       nativeCamera.unregisterObserver(this.slotId);
     }

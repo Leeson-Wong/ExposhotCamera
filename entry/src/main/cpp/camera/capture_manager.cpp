@@ -470,13 +470,15 @@ void CaptureManager::processTask(ImageTask&& task) {
 
     // 检查是否全部处理完成
     if (processed >= config_.frameCount) {
-        OH_LOG_INFO(LOG_APP, "All frames processed, finalizing...");
+        OH_LOG_INFO(LOG_APP, "All frames processed, finalizing... processed=%{public}d, frameCount=%{public}d",
+                    processed, config_.frameCount);
 
         // 获取最终结果
         void* finalBuffer = nullptr;
         size_t finalSize = 0;
 
         if (processor_->finalize(&finalBuffer, &finalSize)) {
+            OH_LOG_INFO(LOG_APP, "Finalize succeeded, finalSize=%{public}zu, calling notifyImage", finalSize);
             // 通知最终结果
             notifyImage(finalBuffer, finalSize, true);
 
@@ -488,6 +490,7 @@ void CaptureManager::processTask(ImageTask&& task) {
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_END, currentSessionId_,
                               100, config_.frameCount, config_.frameCount, "Processing completed successfully"});
         } else {
+            OH_LOG_ERROR(LOG_APP, "Failed to finalize processing result");
             state_.store(CaptureState::ERROR);
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to finalize processing result";
@@ -507,6 +510,8 @@ void CaptureManager::notifyProgress() {
 }
 
 void CaptureManager::notifyImage(void* buffer, size_t size, bool isFinal) {
+    OH_LOG_INFO(LOG_APP, "notifyImage: buffer=%{public}p, size=%{public}zu, isFinal=%{public}d, callback=%{public}s",
+                buffer, size, isFinal, imageCallback_ ? "set" : "null");
     if (imageCallback_) {
         imageCallback_(progress_.sessionId, buffer, size, isFinal);
     }

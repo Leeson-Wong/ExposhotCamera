@@ -1350,8 +1350,12 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
 
             napi_get_reference_value(envLocal, imageData->callbackRef, &callback);
             if (callback) {
+                // 传递 2 个参数: buffer, isFinal
+                napi_value args[2];
+                args[0] = arrayBuffer;  // buffer
+                args[1] = isFinalValue; // isFinal
                 napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &imageDataObj, &retVal);
+                napi_call_function(envLocal, nullptr, callback, 2, args, &retVal);
             } else {
                 OH_LOG_ERROR(LOG_APP, "onBurstImageCallback callback is null");
             }
@@ -1554,6 +1558,13 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
 
 // 取消连拍
 static napi_value CancelBurstCapture(napi_env env, napi_callback_info info) {
+    // 先清除回调有效性，防止新的异步工作被创建
+    {
+        std::lock_guard<std::mutex> lock(g_burstMutex);
+        g_burstProgressCallbackValid = false;
+        g_burstImageCallbackValid = false;
+    }
+
     exposhot::CaptureManager::getInstance().cancelBurst();
 
     napi_value result;

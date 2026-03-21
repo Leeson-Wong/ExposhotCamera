@@ -307,6 +307,11 @@ bool ImageProcessor::initStacking(int32_t totalFrames, uint32_t width, uint32_t 
     width_ = width;
     height_ = height;
 
+    // TODO: 临时 - 跳过缓冲区分配（调试流程编排）
+    OH_LOG_INFO(LOG_APP, "Stacking session initialized (passthrough mode): %{public}d frames, %{public}dx%{public}d",
+                totalFrames, width, height);
+
+    /* 注释掉缓冲区分配
     // 分配累积缓冲区（4 个 float 通道: R, G, B, A）
     size_t bufferSize = static_cast<size_t>(width) * height * 4 * sizeof(float);
     accumulateBuffer_ = static_cast<float*>(malloc(bufferSize));
@@ -325,12 +330,10 @@ bool ImageProcessor::initStacking(int32_t totalFrames, uint32_t width, uint32_t 
         accumulateBuffer_ = nullptr;
         return false;
     }
+    */
 
     initialized_ = true;
-    OH_LOG_INFO(LOG_APP, "Stacking session initialized: %{public}d frames, %{public}dx%{public}d",
-                totalFrames, width, height);
-
-    notifyState("initialized", "Stacking session started");
+    notifyState("initialized", "Stacking session started (passthrough mode)");
     return true;
 }
 
@@ -352,6 +355,24 @@ bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t ra
     OH_LOG_INFO(LOG_APP, "Processing frame %{public}d/%{public}d, rawSize=%{public}zu, %{public}dx%{public}d",
                 frameIndex + 1, totalFrames_, rawSize, width, height);
 
+    // TODO: 临时 - 直接透传 buffer，跳过编解码和堆叠
+    // 释放之前的 buffer
+    if (passthroughBuffer_) {
+        free(passthroughBuffer_);
+        passthroughBuffer_ = nullptr;
+        passthroughSize_ = 0;
+    }
+    // 复制新的 buffer
+    passthroughBuffer_ = malloc(rawSize);
+    if (!passthroughBuffer_) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate passthrough buffer");
+        return false;
+    }
+    memcpy(passthroughBuffer_, rawBuffer, rawSize);
+    passthroughSize_ = rawSize;
+    OH_LOG_INFO(LOG_APP, "Passthrough: copied buffer, size=%{public}zu", passthroughSize_);
+
+    /* 注释掉编解码和堆叠
     // 1. 解码原始图像为 RGBA
     uint8_t* rgbaBuffer = nullptr;
     size_t rgbaSize = 0;
@@ -380,6 +401,7 @@ bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t ra
     }
 
     free(rgbaBuffer);
+    */
 
     processedFrames_++;
     notifyProgress(frameIndex + 1);
@@ -404,6 +426,26 @@ bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
         return false;
     }
 
+    // TODO: 临时 - 直接返回透传的 buffer
+    if (!passthroughBuffer_ || passthroughSize_ == 0) {
+        OH_LOG_ERROR(LOG_APP, "getCurrentResult: no passthrough buffer available");
+        return false;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Returning passthrough buffer, size=%{public}zu", passthroughSize_);
+
+    // 复制一份返回（调用者负责 free）
+    *outBuffer = malloc(passthroughSize_);
+    if (!*outBuffer) {
+        OH_LOG_ERROR(LOG_APP, "Failed to allocate output buffer");
+        return false;
+    }
+    memcpy(*outBuffer, passthroughBuffer_, passthroughSize_);
+    *outSize = passthroughSize_;
+
+    return true;
+
+    /* 注释掉累积结果的转换
     if (!rgbaBuffer_ || !accumulateBuffer_) {
         OH_LOG_ERROR(LOG_APP, "getCurrentResult: null internal buffers");
         return false;
@@ -423,6 +465,7 @@ bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
     // 编码为 PNG（使用已实现的 PNG 编码）
     return encodePng(rgbaBuffer_, static_cast<size_t>(width_) * height_ * 4,
                      width_, height_, outBuffer, outSize);
+    */
 }
 
 bool ImageProcessor::finalize(void** outBuffer, size_t* outSize) {
@@ -446,6 +489,13 @@ void ImageProcessor::reset() {
     if (rgbaBuffer_) {
         free(rgbaBuffer_);
         rgbaBuffer_ = nullptr;
+    }
+
+    // TODO: 临时 - 释放透传 buffer
+    if (passthroughBuffer_) {
+        free(passthroughBuffer_);
+        passthroughBuffer_ = nullptr;
+        passthroughSize_ = 0;
     }
 
     initialized_ = false;
