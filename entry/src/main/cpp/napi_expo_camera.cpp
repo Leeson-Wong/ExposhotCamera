@@ -7,6 +7,7 @@
 #include "file_saver.h"
 #include "hilog/log.h"
 #include "image_processor.h"
+#include <rawfile/raw_file_manager.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -48,6 +49,9 @@ static napi_ref g_burstImageCallbackRef = nullptr;
 static napi_env g_burstEnv = nullptr;
 static std::mutex g_burstMutex;
 static bool g_burstProgressCallbackValid = false;
+
+// 全局 ResourceManager（用于访问 rawfile）
+static NativeResourceManager* g_resourceManager = nullptr;
 static bool g_burstImageCallbackValid = false;
 
 // 拍照事件回调存储
@@ -357,6 +361,27 @@ static void onStateChanged(const std::string& state, const std::string& message)
 }
 
 static napi_value InitCamera(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    // 初始化 ResourceManager（如果传入了参数）
+    if (argc >= 1 && args[0] != nullptr) {
+        // 释放之前可能存在的 ResourceManager
+        if (g_resourceManager != nullptr) {
+            OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
+            g_resourceManager = nullptr;
+        }
+        g_resourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[0]);
+        if (g_resourceManager != nullptr) {
+            OH_LOG_INFO(LOG_APP, "ResourceManager initialized successfully");
+        } else {
+            OH_LOG_ERROR(LOG_APP, "Failed to initialize ResourceManager");
+        }
+    } else {
+        OH_LOG_WARN(LOG_APP, "InitCamera called without ResourceManager argument");
+    }
+
     ExpoCamera& camera = ExpoCamera::getInstance();
     Camera_ErrorCode err = camera.init();
 
@@ -368,6 +393,13 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
 }
 
 static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
+    // 释放全局 ResourceManager
+    if (g_resourceManager != nullptr) {
+        OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
+        g_resourceManager = nullptr;
+        OH_LOG_INFO(LOG_APP, "ResourceManager released");
+    }
+
     ExpoCamera& camera = ExpoCamera::getInstance();
     Camera_ErrorCode err = camera.release();
 
@@ -1637,10 +1669,9 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     };
     static const int RAW_FILE_COUNT = 4;
 
-    // 获取 NativeResourceManager
-    NativeResourceManager* mgr = OH_ResourceManager_InitNativeResourceManager(env, nullptr);
-    if (mgr == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "Failed to init NativeResourceManager");
+    // 使用全局 ResourceManager
+    if (g_resourceManager == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "ResourceManager not initialized, call initCamera with resourceManager first");
 
         napi_value resultObj;
         napi_create_object(env, &resultObj);
@@ -1657,11 +1688,10 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "Reading rawfile: %{public}s (frameIndex=%{public}d, fileIndex=%{public}d)",
                 fileName, frameIndex, fileIndex);
 
-    // 打开 RawFile
-    RawFile* rawFile = OH_ResourceManager_OpenRawFile(mgr, fileName);
+    // 打开 RawFile（使用全局 ResourceManager）
+    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, fileName);
     if (rawFile == nullptr) {
         OH_LOG_ERROR(LOG_APP, "Failed to open rawfile: %{public}s", fileName);
-        OH_ResourceManager_ReleaseNativeResourceManager(mgr);
 
         napi_value resultObj;
         napi_create_object(env, &resultObj);
@@ -1678,7 +1708,6 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     if (fileSize <= 0) {
         OH_LOG_ERROR(LOG_APP, "Invalid rawfile size: %{public}ld", fileSize);
         OH_ResourceManager_CloseRawFile(rawFile);
-        OH_ResourceManager_ReleaseNativeResourceManager(mgr);
 
         napi_value resultObj;
         napi_create_object(env, &resultObj);
@@ -1710,12 +1739,11 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
         dy[1] = res.mean_y[1];
     }
     // NOTE 实际处理区域 开始  当前图像信息都在bgra16Raw中偏移量为dx和dy
-    
+
     // NOTE 实际处理区域 结束
-    
-    // 关闭文件和资源管理器
+
+    // 关闭文件（ResourceManager 是全局的，不需要释放）
     OH_ResourceManager_CloseRawFile(rawFile);
-    OH_ResourceManager_ReleaseNativeResourceManager(mgr);
 
     // 创建返回结果对象
     napi_value resultObj;

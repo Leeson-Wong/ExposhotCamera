@@ -42,8 +42,11 @@ struct TestStackSimulate {
     private xComponentController: XComponentController = new XComponentController();
 
     aboutToAppear(): void {
-        // 初始化相机（不启动预览）
-        const result = nativeCamera.initCamera();
+        // 获取 resourceManager 并传给 NDK
+        const resMgr = getContext(this).resourceManager;
+
+        // 初始化相机（传入 resourceManager 用于访问 rawfile）
+        const result = nativeCamera.initCamera(resMgr);
         if (result === 0) {
             this.cameraInitialized = true;
             this.cameraStatus = '相机已初始化';
