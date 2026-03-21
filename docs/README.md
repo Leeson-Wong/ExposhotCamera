@@ -8,6 +8,7 @@
 | [architecture.md](architecture.md) | 架构设计 - 模块结构、Surface 切换、事件系统 |
 | [AGENTS.md](AGENTS.md) | 模块代理 - 各模块的角色、职责和协作关系 |
 | [development.md](development.md) | 开发记录 - 开发阶段、API 汇总、待办事项 |
+| [testing.md](testing.md) | 测试规划 - NDK 单元测试、集成测试方案（📋 规划中，未落地） |
 
 ## 快速开始
 
