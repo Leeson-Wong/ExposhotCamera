@@ -5,6 +5,7 @@
     "pages/TestBurstCapture",
     "pages/TestFullFeatures",
     "pages/TestFocusPoint",
-    "pages/TestStackSimulate"
+    "pages/TestStackSimulate",
+    "pages/TestFocusMagnifier"
   ]
 }

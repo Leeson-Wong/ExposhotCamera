@@ -47,6 +47,13 @@ struct Index {
           'pages/TestFocusPoint'
         )
 
+        // 对焦放大镜测试
+        this.buildTestEntry(
+          '对焦放大镜测试',
+          '点击对焦时显示放大镜、精确对焦',
+          'pages/TestFocusMagnifier'
+        )
+
         // 模拟堆叠测试
         this.buildTestEntry(
           '模拟堆叠测试',
