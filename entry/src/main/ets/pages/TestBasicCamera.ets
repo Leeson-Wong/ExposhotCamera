@@ -100,6 +100,12 @@ struct TestBasicCamera {
       return;
     }
     try {
+      // 先释放旧的 PixelMap，避免内存泄漏
+      if (this.capturedImage) {
+        this.capturedImage.release();
+        this.capturedImage = undefined;
+      }
+
       const imageSource = image.createImageSource(data.buffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;

@@ -229,6 +229,10 @@ struct TestFocusMagnifier {
       // 缩放到放大镜尺寸
       await croppedPixelMap.scale(MAGNIFIER_ZOOM, MAGNIFIER_ZOOM);
 
+      // 先释放旧的 PixelMap
+      if (this.magnifierPixelMap) {
+        this.magnifierPixelMap.release();
+      }
       this.magnifierPixelMap = croppedPixelMap;
       this.magnifierX = touchX;
       this.magnifierY = touchY;
@@ -244,7 +248,11 @@ struct TestFocusMagnifier {
   hideMagnifier(): void {
     this.showMagnifier = false;
     this.focusAnimating = false;
-    this.magnifierPixelMap = undefined;
+    // 释放 PixelMap 资源
+    if (this.magnifierPixelMap) {
+      this.magnifierPixelMap.release();
+      this.magnifierPixelMap = undefined;
+    }
     // 清除更新定时器
     if (this.magnifierUpdateTimer !== -1) {
       clearInterval(this.magnifierUpdateTimer);

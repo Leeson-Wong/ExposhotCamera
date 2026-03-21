@@ -147,6 +147,12 @@ struct TestFullFeatures {
 
   async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
     try {
+      // 先释放旧的 PixelMap
+      if (this.capturedImage) {
+        this.capturedImage.release();
+        this.capturedImage = undefined;
+      }
+
       const imageSource = image.createImageSource(buffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;

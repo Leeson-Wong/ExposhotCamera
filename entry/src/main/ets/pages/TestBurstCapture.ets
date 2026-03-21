@@ -98,6 +98,11 @@ struct TestBurstCapture {
       const pixelMap = await imageSource.createPixelMap();
 
       if (isFinal) {
+        // 先释放旧的最终结果
+        if (this.finalImage) {
+          this.finalImage.release();
+          this.finalImage = undefined;
+        }
         // 最终堆叠结果
         this.finalImage = pixelMap;
         this.isCapturing = false;
@@ -254,8 +259,18 @@ struct TestBurstCapture {
   }
 
   clearThumbnails(): void {
+    // 释放所有预览图
+    for (const thumbnail of this.thumbnailList) {
+      thumbnail.release();
+    }
     this.thumbnailList = [];
-    this.finalImage = undefined;
+
+    // 释放最终结果
+    if (this.finalImage) {
+      this.finalImage.release();
+      this.finalImage = undefined;
+    }
+
     this.capturedCount = 0;
     this.processedCount = 0;
     this.progressMessage = '';

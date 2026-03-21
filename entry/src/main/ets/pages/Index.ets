@@ -1,8 +1,21 @@
-import { router } from '@kit.ArkUI';
+import { router, window } from '@kit.ArkUI';
 
 @Entry
 @Component
 struct Index {
+  private windowClass: window.Window | undefined = undefined;
+
+  // 封装统一的设置方法
+  private setKeepScreen(isKeep: boolean) {
+    if (!this.windowClass) return;
+
+    this.windowClass.setWindowKeepScreenOn(isKeep).then(() => {
+      console.info(`Screen keep on set to: ${isKeep}`);
+    }).catch((err: BusinessError) => {
+      console.error(`Failed to set keep screen. Code: ${err.code}`);
+    });
+  }
+
   build() {
     Column() {
       // 标题

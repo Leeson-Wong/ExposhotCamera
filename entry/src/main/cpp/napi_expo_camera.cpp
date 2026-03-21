@@ -14,14 +14,14 @@
 #define LOG_DOMAIN 0x3200
 #define LOG_TAG "NapiExpoCamera"
 
-// 全局回调存储
+// 全局回调存储（单次拍照）
+// 简化设计：假设只在初始化时注册一次，注册时加锁，调用时只做空指针检查
 static napi_ref g_photoCallbackRef = nullptr;
-static napi_env g_env = nullptr;
-static std::mutex g_callbackMutex;
+static napi_env g_photoEnv = nullptr;
+static std::mutex g_photoCallbackMutex;  // 仅用于注册时的保护
 static size_t g_photoSize = 0;  // 保存照片大小，用于异步回调
 static int32_t g_photoWidth = 0;  // 保存照片宽度
 static int32_t g_photoHeight = 0;  // 保存照片高度
-static bool g_callbackValid = false;  // 标记回调是否有效
 
 // 拍照错误回调存储
 static napi_ref g_photoErrorCallbackRef = nullptr;
@@ -79,26 +79,16 @@ struct PhotoCallbackData {
 };
 
 // 保存照片数据，用于回调（使用异步工作队列）
+// 简化设计：假设注册在初始化时完成，调用时只做空指针检查
 static void onPhotoData(const std::string& sessionId, void* buffer, size_t size, uint32_t width, uint32_t height) {
     if (!buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Invalid buffer in onPhotoData");
         return;
     }
 
-    // 在锁保护下获取回调引用
-    napi_env callbackEnv = nullptr;
-    napi_ref callbackRef = nullptr;
-    bool callbackValid = false;
-
-    {
-        std::lock_guard<std::mutex> lock(g_callbackMutex);
-        callbackValid = g_callbackValid;
-        callbackEnv = g_env;
-        callbackRef = g_photoCallbackRef;
-    }
-
-    if (!callbackValid || !callbackRef || !callbackEnv) {
-        OH_LOG_ERROR(LOG_APP, "Photo callback not ready");
+    // 简化：只做空指针检查，不加锁（假设注册已在初始化时完成）
+    if (!g_photoCallbackRef || !g_photoEnv) {
+        OH_LOG_ERROR(LOG_APP, "Photo callback not registered");
         return;
     }
 
@@ -115,8 +105,8 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
 
     // 创建回调数据结构
     PhotoCallbackData* callbackData = new PhotoCallbackData{
-        callbackEnv,
-        callbackRef,
+        g_photoEnv,
+        g_photoCallbackRef,
         sessionId,
         copyBuffer,
         size,
@@ -126,11 +116,11 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
 
     // 创建异步工作
     napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(callbackEnv, "onPhotoData", NAPI_AUTO_LENGTH, &asyncResourceName);
+    napi_create_string_utf8(g_photoEnv, "onPhotoData", NAPI_AUTO_LENGTH, &asyncResourceName);
 
     napi_async_work work;
     napi_status status = napi_create_async_work(
-        callbackEnv, nullptr, asyncResourceName,
+        g_photoEnv, nullptr, asyncResourceName,
         [](napi_env envLocal, void* data) {
             // 异步执行阶段（空操作，数据已准备好）
         },
@@ -196,7 +186,7 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
         return;
     }
 
-    napi_queue_async_work_with_qos(callbackEnv, work, napi_qos_user_initiated);
+    napi_queue_async_work_with_qos(g_photoEnv, work, napi_qos_user_initiated);
 }
 
 // 拍照错误回调（异步通知相机硬件错误）
@@ -732,23 +722,17 @@ static napi_value RegisterImageDataCallback(napi_env env, napi_callback_info inf
         return nullptr;
     }
 
-    // 保存回调引用 - 使用互斥锁保护
+    // 保存回调引用 - 加锁保护注册过程
     {
-        std::lock_guard<std::mutex> lock(g_callbackMutex);
-
-        // 先标记为无效，防止在更新过程中有回调发生
-        g_callbackValid = false;
+        std::lock_guard<std::mutex> lock(g_photoCallbackMutex);
 
         // 释放旧的回调引用
-        if (g_photoCallbackRef && g_env) {
-            napi_delete_reference(g_env, g_photoCallbackRef);
+        if (g_photoCallbackRef && g_photoEnv) {
+            napi_delete_reference(g_photoEnv, g_photoCallbackRef);
         }
 
-        g_env = env;
+        g_photoEnv = env;
         napi_create_reference(env, args[0], 1, &g_photoCallbackRef);
-
-        // 标记为有效
-        g_callbackValid = true;
     }
 
     // 设置 C++ 层回调（委托给 CaptureManager）
