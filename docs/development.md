@@ -578,6 +578,56 @@ if (captureManager.isBurstActive()) {
 
 ## 待办事项
 
+### 性能与稳定性优化（对比 CustomCamera 分析）
+
+> 参考项目：`F:\opensource\CustomCamera`（纯 ArkTS 实现，性能优异）
+
+#### 问题 1：预览 Profile 选择未优化
+- **现状**：`expo_camera.cpp` 直接使用 `previewProfiles[0]`，未根据显示比例选择最优
+- **CustomCamera 做法**：根据显示比例排序，选择最匹配的 Profile
+- **影响**：可能选择了不合适的分辨率/帧率组合，影响预览流畅度
+- **优先级**：高
+
+#### 问题 2：缺少前后台生命周期管理
+- **现状**：单例模式，没有前后台自动释放/恢复机制
+- **CustomCamera 做法**：
+  ```typescript
+  onApplicationBackground: () => { cameraManagerRelease(); }
+  onApplicationForeground: () => { cameraManagerStart(); }
+  ```
+- **影响**：后台长时间持有相机资源，可能导致系统回收或稳定性问题
+- **优先级**：高
+
+#### 问题 3：缺少休眠/唤醒机制
+- **现状**：相机一直运行，没有省电策略
+- **CustomCamera 做法**：30秒无操作自动释放相机，用户点击时恢复
+- **影响**：功耗高，长时间运行可能积累问题
+- **优先级**：中
+
+#### 问题 4：拍照数据获取效率低
+- **现状**：手动 `OH_NativeBuffer_Map` → `malloc` → `memcpy` → `OH_NativeBuffer_Unmap`
+- **CustomCamera 做法**：使用 `photoAssetAvailable` 回调，系统托管内存
+- **影响**：每次拍照有额外内存分配和复制开销
+- **优先级**：中（如果是天文堆栈需求，Native 层处理是必要的）
+
+#### 问题 5：连拍线程管理风险
+- **现状**：`std::thread captureThread; captureThread.detach();`
+- **风险**：detach 后线程不可控，异常时难以恢复
+- **CustomCamera 做法**：没有自定义连拍，依赖系统单次拍照
+- **优先级**：中（需要连拍功能时必须解决）
+
+#### 问题 6：单例生命周期与页面不同步
+- **现状**：`ExpoCamera::getInstance()` 是全局单例
+- **问题**：页面销毁时相机可能未正确释放，或释放时机不对
+- **CustomCamera 做法**：ViewModel 绑定页面生命周期
+- **优先级**：高
+
+#### ~~问题 7：Native 层是否有必要~~
+- **结论**：Native 层必要（某些特性只能在 NDK 使用）
+- **状态**：已确认，无需讨论
+
+---
+
 ### 优先级高
 - [x] 完善事件系统，添加 sessionId 关联同一次拍照的事件
 - [x] 单次拍照返回 sessionId，便于追踪

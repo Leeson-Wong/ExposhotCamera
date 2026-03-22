@@ -4,6 +4,7 @@ import { window } from '@kit.ArkUI';
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import PermissionManager from '../util/PermissionManager';
 import CameraConstant from '../util/Constants';
+import { windowManager } from '../util/WindowManager';
 
 const DOMAIN = 0x0000;
 const CAMERA_PERMISSION: Permissions = 'ohos.permission.CAMERA';
@@ -35,6 +36,9 @@ export default class EntryAbility extends UIAbility {
 
     // Request camera permission
     this.requestCameraPermission();
+
+    // Set immersive mode and safe area
+    windowManager.bindWindowClass(windowStage);
 
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {

@@ -1,8 +1,11 @@
 import { router, window } from '@kit.ArkUI';
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
 
 @Entry
 @Component
 struct Index {
+  @StorageLink(SAFE_AREA_TOP) safeTop: number = 0;
+  @StorageLink(SAFE_AREA_BOTTOM) safeBottom: number = 0;
   private windowClass: window.Window | undefined = undefined;
 
   // 封装统一的设置方法
@@ -23,7 +26,7 @@ struct Index {
         .fontSize(28)
         .fontColor(Color.White)
         .fontWeight(FontWeight.Bold)
-        .margin({ top: 60, bottom: 8 })
+        .margin({ top: this.safeTop + 20, bottom: 8 })
 
       Text('相机功能测试入口')
         .fontSize(14)
@@ -81,7 +84,7 @@ struct Index {
       Text('v1.0.0')
         .fontSize(12)
         .fontColor('#555555')
-        .margin({ bottom: 20 })
+        .margin({ bottom: this.safeBottom + 20 })
     }
     .width('100%')
     .height('100%')
