@@ -93,8 +93,9 @@ struct TestBurstCapture {
 
   // 处理连拍图像（中间预览 + 最终结果）
   async processPhotoBuffer(buffer: ArrayBuffer, isFinal: boolean): Promise<void> {
+    let imageSource: image.ImageSource | undefined;
     try {
-      const imageSource = image.createImageSource(buffer);
+      imageSource = image.createImageSource(buffer);
       const pixelMap = await imageSource.createPixelMap();
 
       if (isFinal) {
@@ -115,6 +116,9 @@ struct TestBurstCapture {
       }
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process photo buffer: %{public}s', JSON.stringify(error));
+    } finally {
+      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
+      imageSource?.release();
     }
   }
 

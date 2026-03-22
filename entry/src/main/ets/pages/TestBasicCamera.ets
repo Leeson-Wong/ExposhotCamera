@@ -109,6 +109,8 @@ struct TestBasicCamera {
       const imageSource = image.createImageSource(data.buffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
+      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
+      imageSource.release();
       hilog.info(DOMAIN, TAG, 'Image processed: %{public}dx%{public}d', data.width, data.height);
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process image: %{public}s', JSON.stringify(error));

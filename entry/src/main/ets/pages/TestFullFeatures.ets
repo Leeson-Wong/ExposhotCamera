@@ -156,6 +156,8 @@ struct TestFullFeatures {
       const imageSource = image.createImageSource(buffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
+      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
+      imageSource.release();
     } catch (error) {
       console.error('Failed to process photo buffer:', error);
     }
