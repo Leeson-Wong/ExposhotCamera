@@ -69,11 +69,11 @@ struct TestBasicCamera {
   }
 
   onPreviewChanged = (activeSlotId: string, activeSurfaceId: string): void => {
-    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s', activeSlotId);
-    this.hasPreview = (activeSlotId === this.slotId && activeSlotId !== '');
+    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s, activeSurfaceId=%{public}s', activeSlotId, activeSurfaceId);
 
     if (activeSurfaceId == this.surfaceId) {
       this.slotId = activeSlotId;
+      this.hasPreview = true;
       this.cameraStatus = '预览中';
       this.photoReady = nativeCamera.isPhotoOutputReady();
       this.initCameraParams();
