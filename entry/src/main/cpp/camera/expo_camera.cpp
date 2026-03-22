@@ -911,9 +911,52 @@ Camera_ErrorCode ExpoCamera::createPreviewOutput(const std::string& surfaceId) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
+    // 打印所有可用的 preview profiles
+    OH_LOG_INFO(LOG_APP, "========== PREVIEW PROFILES START ==========");
+    OH_LOG_INFO(LOG_APP, "Total profiles: %{public}u", outputCapability->previewProfilesSize);
+    for (uint32_t i = 0; i < outputCapability->previewProfilesSize; i++) {
+        Camera_Profile* profile = outputCapability->previewProfiles[i];
+        float ratio = static_cast<float>(profile->size.width) / static_cast<float>(profile->size.height);
+        OH_LOG_INFO(LOG_APP, "  [Profile %{public}u] %{public}ux%{public}u | ratio=%.3f | format=%{public}d",
+                    i, profile->size.width, profile->size.height, ratio, profile->format);
+    }
+
+    // 选择与 16:9 比例最接近的 profile，优先选择 1920x1080
+    const float targetRatio = 16.0f / 9.0f;  // 1.777...
+    const uint32_t preferredWidth = 1920;
+    const uint32_t preferredHeight = 1080;
     Camera_Profile* previewProfile = outputCapability->previewProfiles[0];
-    OH_LOG_INFO(LOG_APP, "Preview profile: %{public}ux%{public}u, format=%{public}d",
-                previewProfile->size.width, previewProfile->size.height, previewProfile->format);
+    float bestDiff = 999.0f;
+    bool foundPreferred = false;
+
+    // 先尝试找精确匹配 1920x1080 的
+    for (uint32_t i = 0; i < outputCapability->previewProfilesSize; i++) {
+        Camera_Profile* profile = outputCapability->previewProfiles[i];
+        if (profile->size.width == preferredWidth && profile->size.height == preferredHeight) {
+            previewProfile = profile;
+            foundPreferred = true;
+            OH_LOG_INFO(LOG_APP, "Found preferred profile: 1920x1080");
+            break;
+        }
+    }
+
+    // 如果没找到 1920x1080，选择与 16:9 比例最接近的
+    if (!foundPreferred) {
+        for (uint32_t i = 0; i < outputCapability->previewProfilesSize; i++) {
+            Camera_Profile* profile = outputCapability->previewProfiles[i];
+            float ratio = static_cast<float>(profile->size.width) / static_cast<float>(profile->size.height);
+            float diff = std::abs(ratio - targetRatio);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                previewProfile = profile;
+            }
+        }
+    }
+
+    float selectedRatio = static_cast<float>(previewProfile->size.width) / static_cast<float>(previewProfile->size.height);
+    OH_LOG_INFO(LOG_APP, "========== SELECTED: %{public}ux%{public}u | ratio=%.3f | diff=%.3f ==========",
+                previewProfile->size.width, previewProfile->size.height, selectedRatio, bestDiff);
+    OH_LOG_INFO(LOG_APP, "========== PREVIEW PROFILES END ==========");
 
     // 创建 PreviewOutput
     err = OH_CameraManager_CreatePreviewOutput(
