@@ -29,6 +29,7 @@ struct TestBasicCamera {
   @State zoomSupported: boolean = false;
   // 对焦控制
   @State focusMode: number = FocusMode.CONTINUOUS_AUTO;
+  private surfaceId: string = ''
   // 防抖：防止并发处理图像
   private isProcessingImage: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
@@ -71,7 +72,8 @@ struct TestBasicCamera {
     hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s', activeSlotId);
     this.hasPreview = (activeSlotId === this.slotId && activeSlotId !== '');
 
-    if (activeSlotId !== '') {
+    if (activeSurfaceId == this.surfaceId) {
+      this.slotId = activeSlotId;
       this.cameraStatus = '预览中';
       this.photoReady = nativeCamera.isPhotoOutputReady();
       this.initCameraParams();
@@ -120,6 +122,7 @@ struct TestBasicCamera {
       // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
       imageSource.release();
       hilog.info(DOMAIN, TAG, 'Image processed: %{public}dx%{public}d', data.width, data.height);
+      this.cameraStatus = '拍照成功，已显示';
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process image: %{public}s', JSON.stringify(error));
     } finally {
@@ -192,7 +195,8 @@ struct TestBasicCamera {
           .onLoad(() => {
             hilog.info(DOMAIN, TAG, 'XComponent onLoad');
             const surfaceId = this.xComponentController.getXComponentSurfaceId();
-            this.slotId = this.registerObserver(surfaceId);
+            this.surfaceId = surfaceId;
+            this.registerObserver(surfaceId);
           })
           .width('100%')
           .height('100%')
