@@ -50,6 +50,8 @@ struct TestFullFeatures {
 
   @State capturedImage: PixelMap | undefined = undefined;
 
+  // 防抖：防止并发处理图像
+  private isProcessingImage: boolean = false;
   private xComponentControllerA: XComponentController = new XComponentController();
   private xComponentControllerB: XComponentController = new XComponentController();
 
@@ -146,6 +148,12 @@ struct TestFullFeatures {
   }
 
   async processPhotoBuffer(buffer: ArrayBuffer): Promise<void> {
+    // 防抖：如果正在处理，跳过本次
+    if (this.isProcessingImage) {
+      hilog.warn(DOMAIN, TAG, 'Image processing in progress, skipping');
+      return;
+    }
+    this.isProcessingImage = true;
     try {
       // 先释放旧的 PixelMap
       if (this.capturedImage) {
@@ -160,6 +168,8 @@ struct TestFullFeatures {
       imageSource.release();
     } catch (error) {
       console.error('Failed to process photo buffer:', error);
+    } finally {
+      this.isProcessingImage = false;
     }
   }
 

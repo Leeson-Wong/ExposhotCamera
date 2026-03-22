@@ -44,6 +44,8 @@ struct TestFocusPoint {
   // 提示显示控制
   @State showFocusHint: boolean = true;
 
+  // 防抖：防止并发处理图像
+  private isProcessingImage: boolean = false;
   private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
@@ -142,6 +144,12 @@ struct TestFocusPoint {
       hilog.warn(DOMAIN, TAG, 'No image buffer in data');
       return;
     }
+    // 防抖：如果正在处理，跳过本次
+    if (this.isProcessingImage) {
+      hilog.warn(DOMAIN, TAG, 'Image processing in progress, skipping');
+      return;
+    }
+    this.isProcessingImage = true;
     try {
       // 先释放旧的 PixelMap
       if (this.capturedImage) {
@@ -157,6 +165,8 @@ struct TestFocusPoint {
       hilog.info(DOMAIN, TAG, 'Image processed: %{public}dx%{public}d', data.width, data.height);
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process image: %{public}s', JSON.stringify(error));
+    } finally {
+      this.isProcessingImage = false;
     }
   }
 

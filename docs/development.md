@@ -582,6 +582,45 @@ if (captureManager.isBurstActive()) {
 - [x] 完善事件系统，添加 sessionId 关联同一次拍照的事件
 - [x] 单次拍照返回 sessionId，便于追踪
 
+### 构建配置
+- [ ] **测试/正式环境页面分离（二进制级别）**
+  - **目标**：测试环境打包不带正式页面，正式环境打包不带测试页面
+  - **方案**：Hvigor 构建脚本在编译前物理移动不需要的页面目录
+  - **参考文档**：[HarmonyOS 开发实践——基于hvigor插件定制构建](https://zhuanlan.zhihu.com/p/1896239022227056315)
+
+  **目录结构设计**：
+  ```
+  entry/src/main/ets/
+  ├── pages/           # 测试页面（debug 保留）
+  ├── production/      # 正式页面（release 保留）
+  └── camera/          # 通用 NDK 核心（始终保留）
+  ```
+
+  **关键配置**：
+  - `resources/debug/profile/main_pages.json` - 测试环境页面路由
+  - `resources/release/profile/main_pages.json` - 正式环境页面路由
+  - `entry/hvigorfile.ts` - 使用 `hvigor.nodesEvaluated()` hook 获取 buildMode，移动目录
+
+  **核心代码片段**：
+  ```typescript
+  import { hapTasks, OhosPluginId, OhosHapContext } from '@ohos/hvigor-ohos-plugin';
+  import { hvigor, getNode } from '@ohos/hvigor';
+
+  hvigor.nodesEvaluated(() => {
+    const node = getNode(__filename);
+    const hapContext = node.getContext(OhosPluginId.OHOS_HAP_PLUGIN) as OhosHapContext;
+    const buildMode = hapContext.getBuildMode()?.toLowerCase() || 'debug';
+
+    // 根据 buildMode 移动不需要的目录到 .staging/
+    // 编译完成后恢复
+  });
+  ```
+
+  **注意事项**：
+  - `.staging/` 需加入 `.gitignore`
+  - 编译异常中断时可能需手动恢复目录
+  - IDE 热重载可能受影响
+
 ### 优化项
 - [ ] 添加更复杂的堆叠算法（对齐、去鬼影）
 - [ ] 支持 RAW 格式输出
