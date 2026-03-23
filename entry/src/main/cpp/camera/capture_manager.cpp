@@ -55,6 +55,22 @@ bool CaptureManager::init() {
         return false;
     }
 
+    // 注册照片回调到 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
+    ExpoCamera::getInstance().setPhotoCapturedCallback(
+        [this](void* buffer, size_t size, uint32_t width, uint32_t height) {
+            // 根据当前模式分发到对应处理方法
+            if (currentMode_ == CaptureMode::BURST) {
+                this->onBurstPhotoCaptured(buffer, size, width, height);
+            } else {
+                this->onSinglePhotoCaptured(buffer, size, width, height);
+            }
+        });
+
+    ExpoCamera::getInstance().setPhotoErrorCallback(
+        [this](int32_t errorCode) {
+            this->onPhotoError(errorCode);
+        });
+
     // 启动任务队列
     taskQueue_->start([this](ImageTask&& task) {
         processTask(std::move(task));
@@ -68,6 +84,11 @@ void CaptureManager::release() {
     cancelBurst();
     taskQueue_->stop();
     processor_->reset();
+
+    // 清理注册到 ExpoCamera 的回调
+    ExpoCamera::getInstance().setPhotoCapturedCallback(nullptr);
+    ExpoCamera::getInstance().setPhotoErrorCallback(nullptr);
+
     OH_LOG_INFO(LOG_APP, "CaptureManager released");
 }
 

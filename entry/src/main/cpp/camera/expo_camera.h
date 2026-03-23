@@ -16,11 +16,23 @@
 #include "ohcamera/camera_manager.h"
 #include <multimedia/image_framework/image/image_native.h>
 
+// ==================== 回调类型定义 ====================
+
 // 预览流变化观察者回调
 // activeSlotId: 当前获得预览流的 slot ID
 // activeSurfaceId: 当前获得预览流的 surface ID
 using PreviewObserverCallback = std::function<void(const std::string& activeSlotId, const std::string& activeSurfaceId)>;
 using BindPreviewObserverCallback = std::function<PreviewObserverCallback(const std::string& slotId)>;
+
+// 照片捕获回调（供上层如 CaptureManager 注册）
+// buffer: 图像数据（调用者负责 free）
+// size: 数据大小
+// width, height: 图像尺寸
+using PhotoCapturedCallback = std::function<void(void* buffer, size_t size, uint32_t width, uint32_t height)>;
+
+// 照片错误回调（供上层如 CaptureManager 注册）
+// errorCode: HarmonyOS 相机错误码
+using PhotoErrorCallback = std::function<void(int32_t errorCode)>;
 
 // 观察者信息
 struct PreviewObserver {
@@ -87,6 +99,10 @@ public:
     void subscribeState(const StateCallback& callback);
     void unsubscribeState();
 
+    // 照片回调注册（供 CaptureManager 等上层使用）
+    void setPhotoCapturedCallback(PhotoCapturedCallback callback);
+    void setPhotoErrorCallback(PhotoErrorCallback callback);
+
 private:
     ExpoCamera();
     ~ExpoCamera();
@@ -139,6 +155,10 @@ private:
 
     // 状态订阅
     StateCallback stateCallback_;
+
+    // 照片回调（由 CaptureManager 等上层注册）
+    PhotoCapturedCallback photoCapturedCallback_;
+    PhotoErrorCallback photoErrorCallback_;
 };
 
 #endif // EXPO_CAMERA_H

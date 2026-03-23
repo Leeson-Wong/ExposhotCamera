@@ -1,5 +1,4 @@
 #include "expo_camera.h"
-#include "capture_manager.h"
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -462,8 +461,11 @@ void ExpoCamera::onFrameEnd(Camera_PhotoOutput* photoOutput, int32_t frameCount)
 void ExpoCamera::onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode errorCode) {
     OH_LOG_ERROR(LOG_APP, "Photo output error: %{public}d", errorCode);
 
-    // 通知 CaptureManager 拍照失败
-    exposhot::CaptureManager::getInstance().onPhotoError(static_cast<int32_t>(errorCode));
+    // 通过回调通知上层（如 CaptureManager）
+    ExpoCamera& self = ExpoCamera::getInstance();
+    if (self.photoErrorCallback_) {
+        self.photoErrorCallback_(static_cast<int32_t>(errorCode));
+    }
 }
 
 // 照片可用回调（获取实际照片数据）
@@ -550,26 +552,21 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
         return;
     }
 
-    // 复制数据并传递给 CaptureManager
-    // CaptureManager 根据当前模式（单拍/连拍）决定如何处理数据
-    void* bufferCopy = malloc(nativeBufferSize); // DNG RAW
+    // 复制数据并通过回调传递给上层
+    void* bufferCopy = malloc(nativeBufferSize);
     if (bufferCopy) {
         std::memcpy(bufferCopy, virAddr, nativeBufferSize);
-
-        // 统一传递给 CaptureManager 处理
-        auto& captureManager = exposhot::CaptureManager::getInstance();
 
         // 转换尺寸类型（HarmonyOS API 返回 int32_t，内部使用 uint32_t）
         uint32_t imgWidth = static_cast<uint32_t>(size.width);
         uint32_t imgHeight = static_cast<uint32_t>(size.height);
 
-        // 检查当前是单拍还是连拍模式
-        if (captureManager.isBurstActive()) {
-            // 连拍模式
-            captureManager.onBurstPhotoCaptured(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
+        // 通过回调通知上层（如 CaptureManager）
+        if (self.photoCapturedCallback_) {
+            self.photoCapturedCallback_(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
         } else {
-            // 单拍模式
-            captureManager.onSinglePhotoCaptured(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
+            OH_LOG_WARN(LOG_APP, "No photo captured callback registered, buffer will be freed");
+            free(bufferCopy);
         }
     } else {
         OH_LOG_ERROR(LOG_APP, "Failed to allocate buffer for photo copy");
@@ -1142,6 +1139,18 @@ void ExpoCamera::unsubscribeState() {
 //    std::lock_guard<std::mutex> lock(mutex_);
     stateCallback_ = nullptr;
     OH_LOG_INFO(LOG_APP, "State callback unsubscribed");
+}
+
+// ==================== 照片回调注册 ====================
+
+void ExpoCamera::setPhotoCapturedCallback(PhotoCapturedCallback callback) {
+    photoCapturedCallback_ = callback;
+    OH_LOG_INFO(LOG_APP, "Photo captured callback %{public}s", callback ? "registered" : "cleared");
+}
+
+void ExpoCamera::setPhotoErrorCallback(PhotoErrorCallback callback) {
+    photoErrorCallback_ = callback;
+    OH_LOG_INFO(LOG_APP, "Photo error callback %{public}s", callback ? "registered" : "cleared");
 }
 
 //void ExpoCamera::notifyState(const std::string& state, const std::string& message) {
