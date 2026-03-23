@@ -55,7 +55,14 @@ bool CaptureManager::init() {
         return false;
     }
 
-    // 注册照片回调到 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
+    // 初始化下层 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
+    Camera_ErrorCode err = ExpoCamera::getInstance().init();
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "Failed to init ExpoCamera: %{public}d", err);
+        return false;
+    }
+
+    // 注册照片回调到 ExpoCamera
     ExpoCamera::getInstance().setPhotoCapturedCallback(
         [this](void* buffer, size_t size, uint32_t width, uint32_t height) {
             // 根据当前模式分发到对应处理方法
@@ -88,6 +95,9 @@ void CaptureManager::release() {
     // 清理注册到 ExpoCamera 的回调
     ExpoCamera::getInstance().setPhotoCapturedCallback(nullptr);
     ExpoCamera::getInstance().setPhotoErrorCallback(nullptr);
+
+    // 释放下层 ExpoCamera
+    ExpoCamera::getInstance().release();
 
     OH_LOG_INFO(LOG_APP, "CaptureManager released");
 }

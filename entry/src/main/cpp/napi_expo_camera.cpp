@@ -372,10 +372,10 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
         OH_LOG_WARN(LOG_APP, "InitCamera called without ResourceManager argument");
     }
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.init();
+    // 通过 CaptureManager 初始化（内部会初始化 ExpoCamera 并注册回调）
+    bool success = exposhot::CaptureManager::getInstance().init();
 
-    int32_t result = static_cast<int32_t>(err);
+    int32_t result = success ? 0 : -1;
 
     napi_value napiResult;
     napi_create_int32(env, result, &napiResult);
@@ -390,13 +390,11 @@ static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
         OH_LOG_INFO(LOG_APP, "ResourceManager released");
     }
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.release();
-
-    int32_t result = static_cast<int32_t>(err);
+    // 通过 CaptureManager 释放（内部会释放 ExpoCamera）
+    exposhot::CaptureManager::getInstance().release();
 
     napi_value napiResult;
-    napi_create_int32(env, result, &napiResult);
+    napi_create_int32(env, 0, &napiResult);
     return napiResult;
 }
 
