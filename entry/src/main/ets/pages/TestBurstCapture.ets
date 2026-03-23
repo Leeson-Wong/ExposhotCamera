@@ -138,11 +138,19 @@ struct TestBurstCapture {
       return;
     }
 
+    // 先释放旧资源，避免内存泄漏
+    for (const thumbnail of this.thumbnailList) {
+      thumbnail.release();
+    }
+    this.thumbnailList = [];
+    if (this.finalImage) {
+      this.finalImage.release();
+      this.finalImage = undefined;
+    }
+
     this.isCapturing = true;
     this.capturedCount = 0;
     this.processedCount = 0;
-    this.thumbnailList = [];
-    this.finalImage = undefined;
     this.progressMessage = '准备连拍...';
     this.cameraStatus = '正在连拍...';
 
