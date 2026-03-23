@@ -2,6 +2,7 @@ import nativeCamera, { BurstConfig, BurstProgress } from 'libexpocamera.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { image } from '@kit.ImageKit';
 import { router } from '@kit.ArkUI';
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
 
 const DOMAIN = 0x3200;
 const TAG = 'TestBurstCapture';
@@ -9,6 +10,8 @@ const TAG = 'TestBurstCapture';
 @Entry
 @Component
 struct TestBurstCapture {
+  @StorageProp(SAFE_AREA_TOP) safeTop: number = 0;
+  @StorageProp(SAFE_AREA_BOTTOM) safeBottom: number = 0;
   @State cameraStatus: string = '未初始化';
   @State photoReady: boolean = false;
   @State slotId: string = '';
@@ -32,6 +35,7 @@ struct TestBurstCapture {
   // 最终堆叠结果
   @State finalImage?: PixelMap = undefined;
 
+  private surfaceId: string = '';
   private xComponentController: XComponentController = new XComponentController();
   private countdownTimer: number = -1;  // 倒计时定时器 ID
 
@@ -75,10 +79,11 @@ struct TestBurstCapture {
   }
 
   onPreviewChanged = (activeSlotId: string, activeSurfaceId: string): void => {
-    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s', activeSlotId);
-    this.hasPreview = (activeSlotId === this.slotId && activeSlotId !== '');
+    hilog.info(DOMAIN, TAG, 'Preview changed: activeSlotId=%{public}s, activeSurfaceId=%{public}s', activeSlotId, activeSurfaceId);
 
-    if (activeSlotId !== '') {
+    if (activeSurfaceId == this.surfaceId) {
+      this.slotId = activeSlotId;
+      this.hasPreview = true;
       this.cameraStatus = '预览中';
       this.photoReady = nativeCamera.isPhotoOutputReady();
     }
@@ -285,60 +290,56 @@ struct TestBurstCapture {
   }
 
   build() {
-    Column() {
-      // 顶部状态栏
-      Row() {
-        Button('< 返回')
-          .fontSize(14)
-          .backgroundColor('#666666')
-          .onClick(() => {
-            router.back();
-          })
-
-        Text('连拍测试')
-          .fontSize(16)
-          .fontColor(Color.White)
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-
-        Text(`${this.capturedCount}/${this.burstCount} | ${this.processedCount} processed`)
-          .fontSize(14)
-          .fontColor(this.isCapturing ? Color.Yellow : Color.White)
-      }
-      .width('100%')
-      .padding(12)
-      .backgroundColor('#80000000')
-
-      // 预览区域
-      Stack() {
-        XComponent({
-          id: 'cameraPreview',
-          type: 'surface',
-          libraryname: 'expocamera',
-          controller: this.xComponentController
+    Stack() {
+      // 底层 - 预览流铺满全屏
+      XComponent({
+        id: 'cameraPreview',
+        type: 'surface',
+        libraryname: 'expocamera',
+        controller: this.xComponentController
+      })
+        .onLoad(() => {
+          hilog.info(DOMAIN, TAG, 'XComponent onLoad');
+          const surfaceId = this.xComponentController.getXComponentSurfaceId();
+          this.surfaceId = surfaceId;
+          this.registerObserver(surfaceId);
         })
-          .onLoad(() => {
-            hilog.info(DOMAIN, TAG, 'XComponent onLoad');
-            const surfaceId = this.xComponentController.getXComponentSurfaceId();
-            this.slotId = this.registerObserver(surfaceId);
-          })
-          .width('100%')
-          .height('100%')
-
-        // 状态显示
-        Column() {
-          Text(this.cameraStatus)
-            .fontSize(14)
-            .fontColor(Color.White)
-            .backgroundColor('#80000000')
-            .padding(8)
-            .borderRadius(4)
-        }
         .width('100%')
         .height('100%')
-        .justifyContent(FlexAlign.Start)
-        .alignItems(HorizontalAlign.Center)
-        .padding({ top: 16 })
+
+      // 顶层 - UI叠加
+      Column() {
+        // 顶部状态栏
+        Row() {
+          Button('< 返回')
+            .fontSize(14)
+            .backgroundColor('#666666')
+            .onClick(() => {
+              router.back();
+            })
+
+          Text('连拍测试')
+            .fontSize(16)
+            .fontColor(Color.White)
+            .layoutWeight(1)
+            .textAlign(TextAlign.Center)
+
+          Text(`${this.capturedCount}/${this.burstCount} | ${this.processedCount} processed`)
+            .fontSize(12)
+            .fontColor(this.isCapturing ? Color.Yellow : Color.White)
+        }
+        .width('100%')
+        .padding({ top: this.safeTop + 8, left: 12, right: 12, bottom: 8 })
+        .backgroundColor('#80000000')
+
+        // 状态提示
+        Text(this.cameraStatus)
+          .fontSize(14)
+          .fontColor(Color.White)
+          .backgroundColor('#80000000')
+          .padding(8)
+          .borderRadius(4)
+          .margin({ top: 16 })
 
         // 倒计时大字显示
         if (this.isCountingDown) {
@@ -350,238 +351,200 @@ struct TestBurstCapture {
               .textShadow({ radius: 10, color: '#80000000', offsetX: 0, offsetY: 0 })
           }
           .width('100%')
-          .height('100%')
+          .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
+        } else {
+          // 弹性空间
+          Blank()
         }
 
-        // 连拍指示器
-        if (this.isCapturing) {
+        // 最终堆叠结果预览
+        if (this.finalImage) {
           Column() {
-            LoadingProgress()
-              .width(48)
-              .height(48)
-              .color(Color.White)
+            Image(this.finalImage)
+              .width(80)
+              .height(106)
+              .objectFit(ImageFit.Cover)
+              .border({ width: 2, color: Color.Green })
+              .borderRadius(4)
           }
           .width('100%')
-          .height('100%')
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
+          .alignItems(HorizontalAlign.End)
+          .padding({ right: 16, bottom: 16 })
         }
-      }
-      .layoutWeight(1)
-      .width('100%')
-      .backgroundColor('#000000')
 
-      // 连拍设置
-      Row() {
-        Text('连拍数量:')
-          .fontSize(14)
-          .fontColor(Color.White)
-
-        Button('-')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.burstCount > 1)
-          .onClick(() => {
-            if (this.burstCount > 1) {
-              this.burstCount--;
-            }
-          })
-
-        Text(`${this.burstCount}`)
-          .fontSize(16)
-          .fontColor(Color.White)
-          .width(40)
-          .textAlign(TextAlign.Center)
-
-        Button('+')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.burstCount < 20)
-          .onClick(() => {
-            if (this.burstCount < 20) {
-              this.burstCount++;
-            }
-          })
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-      .backgroundColor('#80000000')
-      .justifyContent(FlexAlign.Center)
-
-      Row() {
-        Text('曝光时间(ms):')
-          .fontSize(14)
-          .fontColor(Color.White)
-
-        Button('-')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.burstExposure > 1000)
-          .onClick(() => {
-            if (this.burstExposure > 1000) {
-              this.burstExposure -= 1000;
-            }
-          })
-
-        Text(`${this.burstExposure}`)
-          .fontSize(16)
-          .fontColor(Color.White)
-          .width(50)
-          .textAlign(TextAlign.Center)
-
-        Button('+')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.burstExposure < 30000)
-          .onClick(() => {
-            if (this.burstExposure < 30000) {
-              this.burstExposure += 1000;
-            }
-          })
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-      .backgroundColor('#80000000')
-      .justifyContent(FlexAlign.Center)
-
-      // 延迟时间设置
-      Row() {
-        Text('延迟拍摄(秒):')
-          .fontSize(14)
-          .fontColor(Color.White)
-
-        Button('-')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.delaySeconds > 0)
-          .onClick(() => {
-            if (this.delaySeconds > 0) {
-              this.delaySeconds--;
-            }
-          })
-
-        Text(this.delaySeconds === 0 ? '关' : `${this.delaySeconds}`)
-          .fontSize(16)
-          .fontColor(Color.White)
-          .width(40)
-          .textAlign(TextAlign.Center)
-
-        Button('+')
-          .fontSize(14)
-          .width(32)
-          .height(32)
-          .backgroundColor('#666666')
-          .enabled(this.delaySeconds < 10)
-          .onClick(() => {
-            if (this.delaySeconds < 10) {
-              this.delaySeconds++;
-            }
-          })
-
-        Text('(0=立即拍摄)')
-          .fontSize(12)
-          .fontColor(Color.Gray)
-          .margin({ left: 8 })
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-      .backgroundColor('#80000000')
-      .justifyContent(FlexAlign.Center)
-
-      // 最终堆叠结果
-      if (this.finalImage) {
-        Row() {
-          Text('最终结果')
-            .fontSize(14)
-            .fontColor(Color.White)
-            .margin({ left: 8, right: 8 })
-
-          Image(this.finalImage)
-            .width(80)
-            .height(106)
-            .objectFit(ImageFit.Cover)
-            .border({ width: 2, color: Color.Green })
-            .margin({ left: 4, right: 4 })
-        }
-        .width('100%')
-        .padding({ top: 8, bottom: 8 })
-        .backgroundColor('#60000000')
-        .alignItems(VerticalAlign.Center)
-      }
-
-      // 中间预览图列表
-      if (this.thumbnailList.length > 0) {
-        Scroll() {
+        // 底部控制区
+        Column() {
+          // 连拍数量设置
           Row() {
-            Text(`中间预览 (${this.thumbnailList.length})`)
-              .fontSize(12)
+            Text('连拍数量:')
+              .fontSize(14)
               .fontColor(Color.White)
-              .margin({ left: 8, right: 8 })
+              .width(70)
 
-            ForEach(this.thumbnailList, (thumbnail: PixelMap, index: number) => {
-              Image(thumbnail)
-                .width(60)
-                .height(80)
-                .border({ width: 1, color: Color.Gray })
-                .margin({ left: 4, right: 4 })
-            })
+            Button('-')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.burstCount > 1 && !this.isCapturing)
+              .onClick(() => {
+                if (this.burstCount > 1) {
+                  this.burstCount--;
+                }
+              })
+
+            Text(`${this.burstCount}`)
+              .fontSize(16)
+              .fontColor(Color.White)
+              .width(40)
+              .textAlign(TextAlign.Center)
+
+            Button('+')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.burstCount < 20 && !this.isCapturing)
+              .onClick(() => {
+                if (this.burstCount < 20) {
+                  this.burstCount++;
+                }
+              })
           }
-          .padding({ left: 8, right: 8 })
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 8, bottom: 4 })
+
+          // 曝光时间设置
+          Row() {
+            Text('曝光时间(ms):')
+              .fontSize(14)
+              .fontColor(Color.White)
+              .width(90)
+
+            Button('-')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.burstExposure > 1000 && !this.isCapturing)
+              .onClick(() => {
+                if (this.burstExposure > 1000) {
+                  this.burstExposure -= 1000;
+                }
+              })
+
+            Text(`${this.burstExposure}`)
+              .fontSize(16)
+              .fontColor(Color.White)
+              .width(50)
+              .textAlign(TextAlign.Center)
+
+            Button('+')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.burstExposure < 30000 && !this.isCapturing)
+              .onClick(() => {
+                if (this.burstExposure < 30000) {
+                  this.burstExposure += 1000;
+                }
+              })
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+
+          // 延迟时间设置
+          Row() {
+            Text('延迟拍摄(秒):')
+              .fontSize(14)
+              .fontColor(Color.White)
+              .width(90)
+
+            Button('-')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.delaySeconds > 0 && !this.isCapturing && !this.isCountingDown)
+              .onClick(() => {
+                if (this.delaySeconds > 0) {
+                  this.delaySeconds--;
+                }
+              })
+
+            Text(this.delaySeconds === 0 ? '关' : `${this.delaySeconds}`)
+              .fontSize(16)
+              .fontColor(Color.White)
+              .width(40)
+              .textAlign(TextAlign.Center)
+
+            Button('+')
+              .fontSize(14)
+              .width(32)
+              .height(28)
+              .backgroundColor('#666666')
+              .enabled(this.delaySeconds < 10 && !this.isCapturing && !this.isCountingDown)
+              .onClick(() => {
+                if (this.delaySeconds < 10) {
+                  this.delaySeconds++;
+                }
+              })
+
+            Text('(0=立即)')
+              .fontSize(12)
+              .fontColor(Color.Gray)
+              .margin({ left: 8 })
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 4, bottom: 8 })
+
+          // 控制按钮
+          Row() {
+            Button('清空')
+              .fontSize(14)
+              .width('25%')
+              .height(44)
+              .backgroundColor('#666666')
+              .enabled(this.thumbnailList.length > 0 || this.finalImage !== undefined)
+              .onClick(() => {
+                this.clearThumbnails();
+              })
+
+            if (this.isCapturing || this.isCountingDown) {
+              Button('取消')
+                .fontSize(16)
+                .width('65%')
+                .height(44)
+                .backgroundColor('#FF0000')
+                .onClick(() => {
+                  this.cancelCapture();
+                })
+            } else {
+              Button(this.delaySeconds > 0 ? `延迟 ${this.delaySeconds}s 拍摄` : '开始连拍')
+                .fontSize(16)
+                .width('65%')
+                .height(44)
+                .enabled(this.photoReady)
+                .backgroundColor(this.photoReady ? '#007DFF' : '#666666')
+                .onClick(() => {
+                  this.startDelayedCapture();
+                })
+            }
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 8, bottom: this.safeBottom + 16 })
+          .justifyContent(FlexAlign.SpaceEvenly)
         }
         .width('100%')
-        .height(100)
-        .backgroundColor('#40000000')
-        .scrollable(ScrollDirection.Horizontal)
-      }
-
-      // 控制按钮
-      Row() {
-        Button('清空')
-          .fontSize(14)
-          .width('25%')
-          .backgroundColor('#666666')
-          .enabled(this.thumbnailList.length > 0 || this.finalImage !== undefined)
-          .onClick(() => {
-            this.clearThumbnails();
-          })
-
-        if (this.isCapturing || this.isCountingDown) {
-          Button('取消')
-            .fontSize(14)
-            .width('65%')
-            .backgroundColor('#FF0000')
-            .onClick(() => {
-              this.cancelCapture();
-            })
-        } else {
-          Button(this.delaySeconds > 0 ? `延迟 ${this.delaySeconds}s 拍摄` : '开始连拍')
-            .fontSize(14)
-            .width('65%')
-            .enabled(this.photoReady)
-            .backgroundColor(this.photoReady ? '#007DFF' : '#666666')
-            .onClick(() => {
-              this.startDelayedCapture();
-            })
-        }
+        .backgroundColor('#80000000')
       }
       .width('100%')
-      .padding(16)
-      .justifyContent(FlexAlign.SpaceEvenly)
+      .height('100%')
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000000')
   }
 }
