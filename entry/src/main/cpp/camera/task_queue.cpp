@@ -147,6 +147,8 @@ void TaskQueue::consumerLoop() {
 
     int64_t loopCount = 0;
     int64_t processedCount = 0;
+    int64_t errorCount = 0;
+    const int64_t MAX_CONSECUTIVE_ERRORS = 5;
 
     while (!stopped_.load()) {
         loopCount++;
@@ -154,7 +156,9 @@ void TaskQueue::consumerLoop() {
                      (long long)loopCount, consumerThread.c_str());
 
         ImageTask task;
-        {
+        bool waitSuccess = false;
+
+        try {
             TQ_LOG_DEBUG("[WAIT_LOCK] loopCount=%{public}lld, waiting for mutex", loopCount);
             std::unique_lock<std::mutex> lock(mutex_);
             TQ_LOG_DEBUG("[LOCK_ACQUIRED] loopCount=%{public}lld, queueSize=%{public}zu, stopped=%{public}d",
@@ -170,6 +174,7 @@ void TaskQueue::consumerLoop() {
             });
             TQ_LOG_DEBUG("[CV_WAIT_END] loopCount=%{public}lld, woken up, queueSize=%{public}zu, stopped=%{public}d",
                          loopCount, queue_.size(), stopped_.load());
+            waitSuccess = true;
 
             // 检查是否应该退出
             if (stopped_.load() && queue_.empty()) {
@@ -187,7 +192,37 @@ void TaskQueue::consumerLoop() {
             } else {
                 TQ_LOG_WARN("[SPURIOUS_WAKEUP] queue is empty after wakeup, loopCount=%{public}lld", loopCount);
             }
-        }  // lock released here
+        } catch (const std::exception& e) {
+            errorCount++;
+            TQ_LOG_ERROR("[CV_WAIT_EXCEPTION] loopCount=%{public}lld, errorCount=%{public}lld, exception: %{public}s",
+                        (long long)loopCount, (long long)errorCount, e.what());
+            // 连续错误过多，退出循环避免无限崩溃
+            if (errorCount >= MAX_CONSECUTIVE_ERRORS) {
+                TQ_LOG_ERROR("[CV_WAIT_FATAL] Too many consecutive errors, exiting consumer loop");
+                break;
+            }
+            // 短暂休眠后重试
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        } catch (...) {
+            errorCount++;
+            TQ_LOG_ERROR("[CV_WAIT_UNKNOWN_EXCEPTION] loopCount=%{public}lld, errorCount=%{public}lld, unknown exception",
+                        (long long)loopCount, (long long)errorCount);
+            if (errorCount >= MAX_CONSECUTIVE_ERRORS) {
+                TQ_LOG_ERROR("[CV_WAIT_FATAL] Too many consecutive errors, exiting consumer loop");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        // wait 成功，重置错误计数
+        errorCount = 0;
+
+        if (!waitSuccess) {
+            continue;
+        }
+
         TQ_LOG_DEBUG("[LOCK_RELEASED] loopCount=%{public}lld, taskId=%{public}d", loopCount, task.taskId);
 
         // 处理任务 (在锁外执行，避免阻塞生产者)
