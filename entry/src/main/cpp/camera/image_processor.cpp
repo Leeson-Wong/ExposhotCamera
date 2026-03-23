@@ -413,35 +413,41 @@ bool ImageProcessor::processFrame(int32_t frameIndex, void* rawBuffer, size_t ra
 }
 
 bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
+    OH_LOG_INFO(LOG_APP, "[IP_GET_RESULT_BEGIN] Acquiring lock...");
     std::lock_guard<std::mutex> lock(mutex_);
+    OH_LOG_INFO(LOG_APP, "[IP_GET_RESULT_LOCKED] Lock acquired");
 
     // 快速失败：空指针检查
     if (!outBuffer || !outSize) {
-        OH_LOG_ERROR(LOG_APP, "getCurrentResult: null output parameters");
+        OH_LOG_ERROR(LOG_APP, "[IP_GET_RESULT_FAILED] null output parameters");
         return false;
     }
 
     if (!initialized_ || processedFrames_ == 0) {
-        OH_LOG_ERROR(LOG_APP, "Not initialized or no frames processed");
+        OH_LOG_ERROR(LOG_APP, "[IP_GET_RESULT_FAILED] Not initialized or no frames processed, initialized=%{public}d, processedFrames=%{public}d",
+                     initialized_, processedFrames_);
         return false;
     }
 
     // TODO: 临时 - 直接返回透传的 buffer
     if (!passthroughBuffer_ || passthroughSize_ == 0) {
-        OH_LOG_ERROR(LOG_APP, "getCurrentResult: no passthrough buffer available");
+        OH_LOG_ERROR(LOG_APP, "[IP_GET_RESULT_FAILED] no passthrough buffer available");
         return false;
     }
 
-    OH_LOG_INFO(LOG_APP, "Returning passthrough buffer, size=%{public}zu", passthroughSize_);
+    OH_LOG_INFO(LOG_APP, "[IP_GET_RESULT] Copying passthrough buffer, size=%{public}zu", passthroughSize_);
 
     // 复制一份返回（调用者负责 free）
     *outBuffer = malloc(passthroughSize_);
     if (!*outBuffer) {
-        OH_LOG_ERROR(LOG_APP, "Failed to allocate output buffer");
+        OH_LOG_ERROR(LOG_APP, "[IP_GET_RESULT_FAILED] Failed to allocate output buffer");
         return false;
     }
     memcpy(*outBuffer, passthroughBuffer_, passthroughSize_);
     *outSize = passthroughSize_;
+
+    OH_LOG_INFO(LOG_APP, "[IP_GET_RESULT_OK] Buffer copied, outBuffer=%{public}p, outSize=%{public}zu",
+                *outBuffer, *outSize);
 
     return true;
 
@@ -469,30 +475,38 @@ bool ImageProcessor::getCurrentResult(void** outBuffer, size_t* outSize) {
 }
 
 bool ImageProcessor::finalize(void** outBuffer, size_t* outSize) {
+    OH_LOG_INFO(LOG_APP, "[IP_FINALIZE_BEGIN] Calling getCurrentResult...");
     bool result = getCurrentResult(outBuffer, outSize);
 
     if (result) {
         notifyState("completed", "Stacking completed");
-        OH_LOG_INFO(LOG_APP, "Stacking finalized, result size: %{public}zu", *outSize);
+        OH_LOG_INFO(LOG_APP, "[IP_FINALIZE_OK] Stacking finalized, result size: %{public}zu", *outSize);
+    } else {
+        OH_LOG_ERROR(LOG_APP, "[IP_FINALIZE_FAILED] getCurrentResult returned false");
     }
 
     return result;
 }
 
 void ImageProcessor::reset() {
+    OH_LOG_INFO(LOG_APP, "[IP_RESET_BEGIN] Acquiring lock...");
     std::lock_guard<std::mutex> lock(mutex_);
+    OH_LOG_INFO(LOG_APP, "[IP_RESET_LOCKED] Lock acquired, resetting...");
 
     if (accumulateBuffer_) {
+        OH_LOG_INFO(LOG_APP, "[IP_RESET] Freeing accumulateBuffer");
         free(accumulateBuffer_);
         accumulateBuffer_ = nullptr;
     }
     if (rgbaBuffer_) {
+        OH_LOG_INFO(LOG_APP, "[IP_RESET] Freeing rgbaBuffer");
         free(rgbaBuffer_);
         rgbaBuffer_ = nullptr;
     }
 
     // TODO: 临时 - 释放透传 buffer
     if (passthroughBuffer_) {
+        OH_LOG_INFO(LOG_APP, "[IP_RESET] Freeing passthroughBuffer, size=%{public}zu", passthroughSize_);
         free(passthroughBuffer_);
         passthroughBuffer_ = nullptr;
         passthroughSize_ = 0;
@@ -504,7 +518,7 @@ void ImageProcessor::reset() {
     width_ = 0;
     height_ = 0;
 
-    OH_LOG_INFO(LOG_APP, "ImageProcessor reset");
+    OH_LOG_INFO(LOG_APP, "[IP_RESET_DONE] ImageProcessor reset complete");
 }
 
 bool ImageProcessor::stackFrame(uint8_t* rgbaBuffer, bool isFirst) {

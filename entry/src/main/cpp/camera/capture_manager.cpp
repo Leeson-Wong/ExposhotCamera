@@ -24,6 +24,20 @@
 
 namespace exposhot {
 
+// 状态转字符串（用于日志）
+static const char* stateToString(CaptureState state) {
+    switch (state) {
+        case CaptureState::IDLE:             return "IDLE";
+        case CaptureState::SINGLE_CAPTURING: return "SINGLE_CAPTURING";
+        case CaptureState::BURST_CAPTURING:  return "BURST_CAPTURING";
+        case CaptureState::PROCESSING:       return "PROCESSING";
+        case CaptureState::COMPLETED:        return "COMPLETED";
+        case CaptureState::ERROR:            return "ERROR";
+        case CaptureState::CANCELLED:        return "CANCELLED";
+        default:                             return "UNKNOWN";
+    }
+}
+
 // 生成唯一的 sessionId
 static std::string generateSessionId() {
     // 使用时间戳 + 随机数生成唯一 ID
@@ -172,11 +186,24 @@ static void notifyProcessEvent(const ProcessEventCallback& callback, const Proce
 int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    CaptureState currentState = state_.load();
+    CM_LOG_INFO("[CAPTURE_SINGLE_BEGIN] currentState=%{public}d (%{public}s)",
+                static_cast<int>(currentState), stateToString(currentState));
+
     // 检查是否有拍摄进行中
     if (isCaptureActive()) {
-        OH_LOG_WARN(LOG_APP, "Capture already in progress, state: %{public}d",
-                    static_cast<int>(state_.load()));
+        CM_LOG_WARN("[CAPTURE_SINGLE_BUSY] Capture already in progress, state: %{public}d (%{public}s)",
+                    static_cast<int>(currentState), stateToString(currentState));
         return -EBUSY;  // 系统标准错误码：设备忙
+    }
+
+    // 如果状态是 COMPLETED 或 ERROR 或 CANCELLED，重置为 IDLE
+    if (currentState == CaptureState::COMPLETED ||
+        currentState == CaptureState::ERROR ||
+        currentState == CaptureState::CANCELLED) {
+        CM_LOG_INFO("[CAPTURE_SINGLE_RESET] Resetting state from %{public}d (%{public}s) to IDLE",
+                    static_cast<int>(currentState), stateToString(currentState));
+        state_.store(CaptureState::IDLE);
     }
 
     // 生成 sessionId
@@ -185,7 +212,9 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     currentMode_ = CaptureMode::SINGLE;
 
     // 进入单拍状态
-    state_.store(CaptureState::SINGLE_CAPTURING);
+    CaptureState oldState = state_.exchange(CaptureState::SINGLE_CAPTURING);
+    CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                stateToString(oldState), stateToString(CaptureState::SINGLE_CAPTURING));
 
     // 通知拍照开始事件
     notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_START, sessionId, -1, "Single capture started"});
@@ -196,7 +225,9 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
     Camera_PhotoOutput* photoOutput = getPhotoOutput();
     if (!photoOutput) {
         OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
-        state_.store(CaptureState::IDLE);
+        CaptureState oldState = state_.exchange(CaptureState::IDLE);
+        CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s (PhotoOutput null)",
+                    stateToString(oldState), stateToString(CaptureState::IDLE));
         // 通知拍照失败事件
         notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "PhotoOutput is null"});
         return -ENODEV;  // 系统标准错误码：设备不存在
@@ -204,7 +235,9 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
 
     Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput);
     if (err != CAMERA_OK) {
-        state_.store(CaptureState::IDLE);
+        CaptureState oldState = state_.exchange(CaptureState::IDLE);
+        CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s (capture trigger failed)",
+                    stateToString(oldState), stateToString(CaptureState::IDLE));
         OH_LOG_ERROR(LOG_APP, "Failed to trigger photo capture: %{public}d", err);
         // 通知拍照失败事件
         notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "Failed to trigger photo capture"});
@@ -240,7 +273,9 @@ void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t w
     }
 
     // 恢复空闲状态
-    state_.store(CaptureState::IDLE);
+    CaptureState oldState = state_.exchange(CaptureState::IDLE);
+    CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                stateToString(oldState), stateToString(CaptureState::IDLE));
     CM_LOG_INFO("[SINGLE_CAPTURE_END] sessionId=%{public}s, state=IDLE", currentSessionId_.c_str());
 }
 
@@ -269,7 +304,9 @@ void CaptureManager::onPhotoError(int32_t errorCode) {
     }
 
     // 恢复空闲状态
-    state_.store(CaptureState::IDLE);
+    CaptureState oldState = state_.exchange(CaptureState::IDLE);
+    CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                stateToString(oldState), stateToString(CaptureState::IDLE));
     CM_LOG_INFO("[PHOTO_ERROR_END] State reset to IDLE");
 }
 
@@ -278,10 +315,23 @@ void CaptureManager::onPhotoError(int32_t errorCode) {
 int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSessionId) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (state_.load() != CaptureState::IDLE) {
-        OH_LOG_WARN(LOG_APP, "Capture already in progress, state: %{public}d",
-                    static_cast<int>(state_.load()));
-        return -EBUSY;  // 系统标准错误码：设备忙
+    CaptureState currentState = state_.load();
+    CM_LOG_INFO("[START_BURST_BEGIN] currentState=%{public}d (%{public}s), frameCount=%{public}d",
+                static_cast<int>(currentState), stateToString(currentState), config.frameCount);
+
+    if (currentState != CaptureState::IDLE) {
+        // 如果状态是 COMPLETED/ERROR/CANCELLED，可以重置并继续
+        if (currentState == CaptureState::COMPLETED ||
+            currentState == CaptureState::ERROR ||
+            currentState == CaptureState::CANCELLED) {
+            CM_LOG_INFO("[START_BURST_RESET] Resetting state from %{public}d (%{public}s) to IDLE",
+                        static_cast<int>(currentState), stateToString(currentState));
+            state_.store(CaptureState::IDLE);
+        } else {
+            CM_LOG_WARN("[START_BURST_BUSY] Capture already in progress, state: %{public}d (%{public}s)",
+                        static_cast<int>(currentState), stateToString(currentState));
+            return -EBUSY;  // 系统标准错误码：设备忙
+        }
     }
 
     // 生成 sessionId
@@ -294,8 +344,10 @@ int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSe
     captureCount_.store(0);
     processCount_.store(0);
 
-    // 重置图像处理器
-    processor_->reset();
+    // 注意：不要在这里重置图像处理器！
+    // 如果上一轮还在处理中，reset() 会释放 passthroughBuffer_ 导致崩溃
+    // reset 应该在 finalize 完成后或取消后进行
+    // processor_->reset();  // 移除，改为在需要时重置
 
     // 设置处理器进度回调
     processor_->setProgressCallback([this, sessionId](int32_t current, int32_t total,
@@ -317,7 +369,10 @@ int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSe
     });
 
     // 更新状态和 sessionId
-    state_.store(CaptureState::BURST_CAPTURING);
+    CaptureState oldState = state_.exchange(CaptureState::BURST_CAPTURING);
+    CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                stateToString(oldState), stateToString(CaptureState::BURST_CAPTURING));
+
     progress_.sessionId = sessionId;
     progress_.state = CaptureState::BURST_CAPTURING;
     progress_.totalFrames = config.frameCount;
@@ -347,35 +402,53 @@ void CaptureManager::cancelBurst() {
     if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
         expected = CaptureState::PROCESSING;
         if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
-            CM_LOG_INFO("[CANCEL_BURST_IGNORED] Not in BURST_CAPTURING or PROCESSING state, currentState=%{public}d",
-                        static_cast<int>(state_.load()));
+            CM_LOG_INFO("[CANCEL_BURST_IGNORED] Not in BURST_CAPTURING or PROCESSING state, currentState=%{public}d (%{public}s)",
+                        static_cast<int>(state_.load()), stateToString(state_.load()));
             return;
         }
     }
 
-    CM_LOG_INFO("[CANCEL_BURST] State changed to CANCELLED from %{public}d", static_cast<int>(expected));
+    CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s (cancel burst)",
+                stateToString(expected), stateToString(CaptureState::CANCELLED));
+    CM_LOG_INFO("[CANCEL_BURST] State changed to CANCELLED");
 
     progress_.state = CaptureState::CANCELLED;
     progress_.message = "Burst cancelled";
     notifyProgress();
 
-    // 清空队列
+    // 清空队列（等待当前任务完成后再清空）
+    // 注意：clear() 会等待锁，但不会中断正在处理的任务
     taskQueue_->clear();
 
-    CM_LOG_INFO("[CANCEL_BURST_DONE] Queue cleared");
+    // 重置处理器，释放可能存在的资源
+    processor_->reset();
+
+    CM_LOG_INFO("[CANCEL_BURST_DONE] Queue cleared, processor reset");
 }
 
 void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
     CaptureState currentState = state_.load();
 
+    CM_LOG_ERROR("[BURST_PHOTO_RAW_INPUT] buffer=%{public}p, size=%{public}zu, width=%{public}u, height=%{public}u",
+                buffer, size, static_cast<unsigned int>(width), static_cast<unsigned int>(height));
+
+    // 验证图像尺寸是否合理
+    if (width == 0 || height == 0 || width > 10000 || height > 10000) {
+        CM_LOG_ERROR("[BURST_PHOTO_INVALID_SIZE] Invalid image dimensions, freeing buffer");
+        free(buffer);  // 释放传入的 buffer
+        return;
+    }
+
     if (currentState == CaptureState::CANCELLED) {
         CM_LOG_INFO("[BURST_CAPTURE_IGNORED] Burst cancelled, ignoring captured photo");
+        free(buffer);  // 释放传入的 buffer
         return;
     }
 
     if (currentState != CaptureState::BURST_CAPTURING) {
         CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Not in BURST_CAPTURING state, currentState=%{public}d",
                     static_cast<int>(currentState));
+        free(buffer);  // 释放传入的 buffer
         return;
     }
 
@@ -385,11 +458,14 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
         // 已拍摄足够帧数
         CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Already captured enough frames, frameIndex=%{public}d >= frameCount=%{public}d",
                     frameIndex, config_.frameCount);
+        free(buffer);  // 释放传入的 buffer
         return;
     }
 
-    CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
-                frameIndex + 1, config_.frameCount, size, width, height);
+    CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, bufferSize=%{public}zu",
+                frameIndex + 1, config_.frameCount, size);
+    CM_LOG_INFO("[BURST_CAPTURE_DIMS] width=%{public}u, height=%{public}u",
+                static_cast<unsigned int>(width), static_cast<unsigned int>(height));
 
     // 复制 buffer
     void* copyBuffer = malloc(size);
@@ -398,6 +474,9 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
         return;
     }
     memcpy(copyBuffer, buffer, size);
+
+    // 释放原始 buffer（数据已复制）
+    free(buffer);
 
     // 创建任务并入队
     ImageTask task;
@@ -423,7 +502,10 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
         CM_LOG_INFO("[BURST_CAPTURE_ALL_DONE] All %{public}d frames captured, switching to PROCESSING state",
                     config_.frameCount);
 
-        state_.store(CaptureState::PROCESSING);
+        CaptureState oldState = state_.exchange(CaptureState::PROCESSING);
+        CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                    stateToString(oldState), stateToString(CaptureState::PROCESSING));
+
         progress_.state = CaptureState::PROCESSING;
         progress_.message = "All frames captured, processing stacked image";
         notifyProgress();
@@ -478,13 +560,18 @@ void CaptureManager::captureNextFrame() {
 void CaptureManager::processTask(ImageTask&& task) {
     CaptureState currentState = state_.load();
 
+    CM_LOG_INFO("[PROCESS_TASK_ENTER] taskId=%{public}d, currentState=%{public}s",
+                task.taskId, stateToString(currentState));
+
     if (currentState == CaptureState::CANCELLED) {
         CM_LOG_INFO("[PROCESS_TASK_SKIP] taskId=%{public}d, burst cancelled", task.taskId);
         return;
     }
 
-    CM_LOG_INFO("[PROCESS_TASK_BEGIN] taskId=%{public}d, size=%{public}zu, %{public}dx%{public}d, state=%{public}d",
-                task.taskId, task.size, task.width, task.height, static_cast<int>(currentState));
+    CM_LOG_INFO("[PROCESS_TASK_BEGIN] taskId=%{public}d, bufferSize=%{public}zu",
+                task.taskId, task.size);
+    CM_LOG_INFO("[PROCESS_TASK_DIMS] width=%{public}u, height=%{public}u",
+                static_cast<unsigned int>(task.width), static_cast<unsigned int>(task.height));
 
     // 第一帧: 初始化处理会话
     if (task.isFirst) {
@@ -495,9 +582,15 @@ void CaptureManager::processTask(ImageTask&& task) {
         CM_LOG_INFO("[PROCESS_TASK_INIT] Initializing processor, frameCount=%{public}d, size=%{public}dx%{public}d",
                     config_.frameCount, imageWidth_, imageHeight_);
 
+        // 在初始化新会话前重置处理器（确保旧资源已释放）
+        processor_->reset();
+
         if (!processor_->initStacking(config_.frameCount, imageWidth_, imageHeight_)) {
             CM_LOG_ERROR("[PROCESS_TASK_INIT_FAILED] Failed to init processing session");
-            state_.store(CaptureState::ERROR);
+            CaptureState oldState = state_.exchange(CaptureState::ERROR);
+            CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                        stateToString(oldState), stateToString(CaptureState::ERROR));
+
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to initialize processing session";
             notifyProgress();
@@ -550,21 +643,34 @@ void CaptureManager::processTask(ImageTask&& task) {
         void* finalBuffer = nullptr;
         size_t finalSize = 0;
 
+        CM_LOG_INFO("[PROCESS_TASK_FINALIZE_CALL] Calling processor_->finalize()");
         if (processor_->finalize(&finalBuffer, &finalSize)) {
-            CM_LOG_INFO("[PROCESS_TASK_FINALIZE_OK] finalSize=%{public}zu", finalSize);
-            // 通知最终结果
-            notifyImage(finalBuffer, finalSize, true);
+            CM_LOG_INFO("[PROCESS_TASK_FINALIZE_OK] finalBuffer=%{public}p, finalSize=%{public}zu",
+                        finalBuffer, finalSize);
 
-            state_.store(CaptureState::COMPLETED);
+            // 通知最终结果
+            CM_LOG_INFO("[PROCESS_TASK_NOTIFY_IMAGE] Calling notifyImage()");
+            notifyImage(finalBuffer, finalSize, true);
+            CM_LOG_INFO("[PROCESS_TASK_NOTIFY_IMAGE_DONE] notifyImage() returned");
+
+            CaptureState oldState = state_.exchange(CaptureState::COMPLETED);
+            CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s (session finished, ready for next)",
+                        stateToString(oldState), stateToString(CaptureState::COMPLETED));
+
             progress_.state = CaptureState::COMPLETED;
             progress_.message = "Burst capture completed successfully";
 
             // 通知处理完成事件
+            CM_LOG_INFO("[PROCESS_TASK_NOTIFY_PROCESS_END] Calling notifyProcessEvent()");
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_END, currentSessionId_,
                               100, config_.frameCount, config_.frameCount, "Processing completed successfully"});
+            CM_LOG_INFO("[PROCESS_TASK_ALL_DONE] All done, function returning");
         } else {
             CM_LOG_ERROR("[PROCESS_TASK_FINALIZE_FAILED] Failed to finalize processing result");
-            state_.store(CaptureState::ERROR);
+            CaptureState oldState = state_.exchange(CaptureState::ERROR);
+            CM_LOG_INFO("[STATE_CHANGE] %{public}s -> %{public}s",
+                        stateToString(oldState), stateToString(CaptureState::ERROR));
+
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to finalize processing result";
 
@@ -583,10 +689,24 @@ void CaptureManager::notifyProgress() {
 }
 
 void CaptureManager::notifyImage(void* buffer, size_t size, bool isFinal) {
-    CM_LOG_INFO("[NOTIFY_IMAGE] buffer=%{public}p, size=%{public}zu, isFinal=%{public}d, callback=%{public}s",
+    CM_LOG_INFO("[NOTIFY_IMAGE_BEGIN] buffer=%{public}p, size=%{public}zu, isFinal=%{public}d, callback=%{public}s",
                 buffer, size, isFinal, imageCallback_ ? "set" : "null");
+
+    if (!buffer || size == 0) {
+        CM_LOG_ERROR("[NOTIFY_IMAGE_ERROR] Invalid buffer or size");
+        return;
+    }
+
     if (imageCallback_) {
+        // 回调到 UI 层，注意：buffer 的所有权转移给回调接收者
+        // 调用者负责确保 buffer 在回调返回后不再被使用
+        CM_LOG_INFO("[NOTIFY_IMAGE_CALL] Calling imageCallback_...");
         imageCallback_(progress_.sessionId, buffer, size, isFinal);
+        CM_LOG_INFO("[NOTIFY_IMAGE_END] callback returned, isFinal=%{public}d", isFinal);
+    } else {
+        // 没有回调，需要释放 buffer 避免内存泄漏
+        CM_LOG_WARN("[NOTIFY_IMAGE_NO_CALLBACK] No callback, freeing buffer");
+        free(buffer);
     }
 }
 

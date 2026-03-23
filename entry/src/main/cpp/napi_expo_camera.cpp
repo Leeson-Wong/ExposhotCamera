@@ -1279,8 +1279,11 @@ static napi_value UnsubscribeState(napi_env env, napi_callback_info info) {
 
 // 连拍图像数据回调 (内部使用)
 static void onBurstImageCallback(const std::string& sessionId, void* buffer, size_t size, bool isFinal) {
+    OH_LOG_INFO(LOG_APP, "[NAPI_BURST_CB_ENTER] sessionId=%{public}s, size=%{public}zu, isFinal=%{public}d",
+                sessionId.c_str(), size, isFinal);
+
     if (!buffer || size == 0) {
-        OH_LOG_ERROR(LOG_APP, "Invalid buffer in onBurstImageCallback");
+        OH_LOG_ERROR(LOG_APP, "[NAPI_BURST_CB_ERROR] Invalid buffer");
         return;
     }
 
@@ -1297,12 +1300,12 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
     }
 
     if (!callbackValid || !callbackRef || !callbackEnv) {
-        OH_LOG_ERROR(LOG_APP, "Burst image callback not ready");
+        OH_LOG_ERROR(LOG_APP, "[NAPI_BURST_CB_ERROR] Callback not ready");
+        free(buffer);  // 释放 buffer 避免内存泄漏
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "onBurstImageCallback sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
-                sessionId.c_str(), size, isFinal);
+    OH_LOG_INFO(LOG_APP, "[NAPI_BURST_CB_COPY] Copying buffer...");
 
     // 复制 buffer 数据
     void* copyBuffer = malloc(size);

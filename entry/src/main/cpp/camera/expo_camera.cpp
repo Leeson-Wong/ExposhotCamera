@@ -489,13 +489,24 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
 
     // 获取图像尺寸
     Image_Size size;
+    memset(&size, 0, sizeof(size));  // 初始化为0
     Image_ErrorCode imageErr = OH_ImageNative_GetImageSize(imageNative, &size);
     if (imageErr != IMAGE_SUCCESS) {
-        OH_LOG_ERROR(LOG_APP, "OH_ImageNative_GetImageSize failed: %{public}d", imageErr);
+        OH_LOG_ERROR(LOG_APP, "[PHOTO_SIZE_ERROR] OH_ImageNative_GetImageSize failed: %{public}d", imageErr);
         OH_ImageNative_Release(imageNative);
         return;
     }
-    OH_LOG_INFO(LOG_APP, "Photo size: %{public}d x %{public}d", size.width, size.height);
+    // 使用 ERROR 级别确保日志可见
+    OH_LOG_ERROR(LOG_APP, "[PHOTO_SIZE_OK] width=%{public}d, height=%{public}d, sizeof(Image_Size)=%{public}zu",
+                size.width, size.height, sizeof(Image_Size));
+
+    // 验证尺寸是否合理
+    if (size.width <= 0 || size.height <= 0 || size.width > 10000 || size.height > 10000) {
+        OH_LOG_ERROR(LOG_APP, "[PHOTO_SIZE_INVALID] Invalid image size: %{public}d x %{public}d",
+                    size.width, size.height);
+        OH_ImageNative_Release(imageNative);
+        return;
+    }
 
     // 获取组件类型数量
     size_t componentTypeSize = 0;
