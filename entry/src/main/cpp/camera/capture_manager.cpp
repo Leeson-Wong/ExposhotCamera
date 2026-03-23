@@ -15,6 +15,13 @@
 #define LOG_DOMAIN 0x3200
 #define LOG_TAG "CaptureManager"
 
+// 多线程调试日志标识符，使用 "CM_" 前缀便于过滤
+// 过滤命令: hilog | grep -E "CM_|TQ_"
+#define CM_LOG_DEBUG(fmt, ...) OH_LOG_DEBUG(LOG_APP, "[CM_DEBUG] " fmt, ##__VA_ARGS__)
+#define CM_LOG_INFO(fmt, ...)  OH_LOG_INFO(LOG_APP, "[CM_INFO] " fmt, ##__VA_ARGS__)
+#define CM_LOG_WARN(fmt, ...)  OH_LOG_WARN(LOG_APP, "[CM_WARN] " fmt, ##__VA_ARGS__)
+#define CM_LOG_ERROR(fmt, ...) OH_LOG_ERROR(LOG_APP, "[CM_ERROR] " fmt, ##__VA_ARGS__)
+
 namespace exposhot {
 
 // 生成唯一的 sessionId
@@ -50,16 +57,24 @@ CaptureManager::~CaptureManager() {
 bool CaptureManager::init() {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    CM_LOG_INFO("[INIT_BEGIN] currentState=%{public}d, taskQueueRunning=%{public}d",
+                static_cast<int>(state_.load()), taskQueue_->isRunning());
+
     if (state_.load() != CaptureState::IDLE) {
-        OH_LOG_WARN(LOG_APP, "CaptureManager not in IDLE state, current: %{public}d",
-                    static_cast<int>(state_.load()));
+        CM_LOG_WARN("[INIT_FAILED] CaptureManager not in IDLE state");
         return false;
+    }
+
+    // 确保之前的资源已释放
+    if (taskQueue_->isRunning()) {
+        CM_LOG_WARN("[INIT_FORCE_STOP] TaskQueue still running, force stop first");
+        taskQueue_->stop();
     }
 
     // 初始化下层 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
     Camera_ErrorCode err = ExpoCamera::getInstance().init();
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to init ExpoCamera: %{public}d", err);
+        CM_LOG_ERROR("[INIT_FAILED] ExpoCamera init failed: %{public}d", err);
         return false;
     }
 
@@ -87,11 +102,13 @@ bool CaptureManager::init() {
         processTask(std::move(task));
     });
 
-    OH_LOG_INFO(LOG_APP, "CaptureManager initialized");
+    CM_LOG_INFO("[INIT_DONE] CaptureManager initialized successfully");
     return true;
 }
 
 void CaptureManager::release() {
+    CM_LOG_INFO("[RELEASE_BEGIN] currentState=%{public}d", static_cast<int>(state_.load()));
+
     cancelBurst();
     taskQueue_->stop();
     processor_->reset();
@@ -103,7 +120,7 @@ void CaptureManager::release() {
     // 释放下层 ExpoCamera
     ExpoCamera::getInstance().release();
 
-    OH_LOG_INFO(LOG_APP, "CaptureManager released");
+    CM_LOG_INFO("[RELEASE_DONE] CaptureManager released");
 }
 
 void CaptureManager::setProgressCallback(BurstProgressCallback callback) {
@@ -201,14 +218,16 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
 void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (state_.load() != CaptureState::SINGLE_CAPTURING) {
-        OH_LOG_WARN(LOG_APP, "Not in SINGLE_CAPTURING state, current: %{public}d",
-                    static_cast<int>(state_.load()));
+    CaptureState currentState = state_.load();
+
+    CM_LOG_INFO("[SINGLE_CAPTURE_BEGIN] sessionId=%{public}s, size=%{public}zu, %{public}ux%{public}u, state=%{public}d",
+                currentSessionId_.c_str(), size, width, height, static_cast<int>(currentState));
+
+    if (currentState != CaptureState::SINGLE_CAPTURING) {
+        CM_LOG_WARN("[SINGLE_CAPTURE_FAILED] Not in SINGLE_CAPTURING state, current: %{public}d",
+                    static_cast<int>(currentState));
         return;
     }
-
-    OH_LOG_INFO(LOG_APP, "Single photo captured: sessionId=%{public}s, size=%{public}zu, %{public}ux%{public}u",
-                currentSessionId_.c_str(), size, width, height);
 
     // 通知拍照结束事件
     notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, -1, "Single photo captured successfully"});
@@ -217,12 +236,12 @@ void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t w
     if (singlePhotoCallback_) {
         singlePhotoCallback_(currentSessionId_, buffer, size, width, height);
     } else {
-        OH_LOG_WARN(LOG_APP, "No single photo callback set");
+        CM_LOG_WARN("[SINGLE_CAPTURE_NO_CALLBACK] No single photo callback set");
     }
 
     // 恢复空闲状态
     state_.store(CaptureState::IDLE);
-    OH_LOG_INFO(LOG_APP, "Single capture completed");
+    CM_LOG_INFO("[SINGLE_CAPTURE_END] sessionId=%{public}s, state=IDLE", currentSessionId_.c_str());
 }
 
 // 拍照错误通知（由 ExpoCamera 调用，异步通知相机硬件错误）
@@ -231,16 +250,15 @@ void CaptureManager::onPhotoError(int32_t errorCode) {
 
     CaptureState currentState = state_.load();
 
+    CM_LOG_ERROR("[PHOTO_ERROR] sessionId=%{public}s, errorCode=%{public}d, currentState=%{public}d",
+                currentSessionId_.c_str(), errorCode, static_cast<int>(currentState));
+
     // 只有在拍摄状态下才处理错误
     if (currentState != CaptureState::SINGLE_CAPTURING &&
         currentState != CaptureState::BURST_CAPTURING) {
-        OH_LOG_WARN(LOG_APP, "Photo error received but not in capturing state: %{public}d",
-                    static_cast<int>(currentState));
+        CM_LOG_WARN("[PHOTO_ERROR_IGNORED] Not in capturing state, ignoring error");
         return;
     }
-
-    OH_LOG_ERROR(LOG_APP, "Photo error: sessionId=%{public}s, errorCode=%{public}d",
-                currentSessionId_.c_str(), errorCode);
 
     // 通知拍照失败事件
     notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, currentSessionId_, -1, "Photo capture failed"});
@@ -252,7 +270,7 @@ void CaptureManager::onPhotoError(int32_t errorCode) {
 
     // 恢复空闲状态
     state_.store(CaptureState::IDLE);
-    OH_LOG_INFO(LOG_APP, "Capture reset to IDLE due to error");
+    CM_LOG_INFO("[PHOTO_ERROR_END] State reset to IDLE");
 }
 
 // ==================== 连拍 ====================
@@ -329,9 +347,13 @@ void CaptureManager::cancelBurst() {
     if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
         expected = CaptureState::PROCESSING;
         if (!state_.compare_exchange_strong(expected, CaptureState::CANCELLED)) {
+            CM_LOG_INFO("[CANCEL_BURST_IGNORED] Not in BURST_CAPTURING or PROCESSING state, currentState=%{public}d",
+                        static_cast<int>(state_.load()));
             return;
         }
     }
+
+    CM_LOG_INFO("[CANCEL_BURST] State changed to CANCELLED from %{public}d", static_cast<int>(expected));
 
     progress_.state = CaptureState::CANCELLED;
     progress_.message = "Burst cancelled";
@@ -340,17 +362,20 @@ void CaptureManager::cancelBurst() {
     // 清空队列
     taskQueue_->clear();
 
-    OH_LOG_INFO(LOG_APP, "Burst cancelled");
+    CM_LOG_INFO("[CANCEL_BURST_DONE] Queue cleared");
 }
 
 void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
-    if (state_.load() == CaptureState::CANCELLED) {
-        OH_LOG_INFO(LOG_APP, "Burst cancelled, ignoring captured photo");
+    CaptureState currentState = state_.load();
+
+    if (currentState == CaptureState::CANCELLED) {
+        CM_LOG_INFO("[BURST_CAPTURE_IGNORED] Burst cancelled, ignoring captured photo");
         return;
     }
 
-    if (state_.load() != CaptureState::BURST_CAPTURING) {
-        OH_LOG_WARN(LOG_APP, "Not in BURST_CAPTURING state, ignoring captured photo");
+    if (currentState != CaptureState::BURST_CAPTURING) {
+        CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Not in BURST_CAPTURING state, currentState=%{public}d",
+                    static_cast<int>(currentState));
         return;
     }
 
@@ -358,17 +383,18 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
 
     if (frameIndex >= config_.frameCount) {
         // 已拍摄足够帧数
-        OH_LOG_INFO(LOG_APP, "Already captured enough frames, ignoring");
+        CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Already captured enough frames, frameIndex=%{public}d >= frameCount=%{public}d",
+                    frameIndex, config_.frameCount);
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "Photo captured: frame %{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
+    CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
                 frameIndex + 1, config_.frameCount, size, width, height);
 
     // 复制 buffer
     void* copyBuffer = malloc(size);
     if (!copyBuffer) {
-        OH_LOG_ERROR(LOG_APP, "Failed to allocate buffer for frame %{public}d", frameIndex);
+        CM_LOG_ERROR("[BURST_CAPTURE_ALLOC_FAILED] Failed to allocate buffer for frame %{public}d", frameIndex);
         return;
     }
     memcpy(copyBuffer, buffer, size);
@@ -391,19 +417,33 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
     // 通知拍照进度事件
     notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, frameIndex,
                                            "Frame captured"});
+
+    // 最后一帧捕获完成，切换到处理状态
+    if (frameIndex + 1 == config_.frameCount) {
+        CM_LOG_INFO("[BURST_CAPTURE_ALL_DONE] All %{public}d frames captured, switching to PROCESSING state",
+                    config_.frameCount);
+
+        state_.store(CaptureState::PROCESSING);
+        progress_.state = CaptureState::PROCESSING;
+        progress_.message = "All frames captured, processing stacked image";
+        notifyProgress();
+
+        // 通知处理开始事件
+        notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_START, currentSessionId_,
+                          0, 0, config_.frameCount, "Processing started"});
+    }
 }
 
 void CaptureManager::startCaptureLoop() {
-    OH_LOG_INFO(LOG_APP, "Capture loop started, will capture %{public}d frames",
-                config_.frameCount);
+    CM_LOG_INFO("[CAPTURE_LOOP_START] frameCount=%{public}d", config_.frameCount);
 
     for (int32_t i = 0; i < config_.frameCount; i++) {
         if (state_.load() == CaptureState::CANCELLED) {
-            OH_LOG_INFO(LOG_APP, "Burst cancelled, stopping capture loop");
+            CM_LOG_INFO("[CAPTURE_LOOP_CANCELLED] Burst cancelled at frame %{public}d", i);
             break;
         }
 
-        OH_LOG_INFO(LOG_APP, "Capturing frame %{public}d/%{public}d", i + 1, config_.frameCount);
+        CM_LOG_INFO("[CAPTURE_LOOP_TRIGGER] Triggering frame %{public}d/%{public}d", i + 1, config_.frameCount);
         captureNextFrame();
 
         // 等待曝光时间(除了最后一帧)
@@ -412,22 +452,11 @@ void CaptureManager::startCaptureLoop() {
         }
     }
 
-    // 拍摄完成,切换到处理状态
-    if (state_.load() == CaptureState::BURST_CAPTURING) {
-        state_.store(CaptureState::PROCESSING);
-        progress_.state = CaptureState::PROCESSING;
-        progress_.message = "All frames captured, processing stacked image";
-        notifyProgress();
+    // 注意：不在这里切换到 PROCESSING 状态！
+    // 状态切换移到 onBurstPhotoCaptured 中，当最后一帧回调到达时才切换
+    // 因为 OH_PhotoOutput_Capture 是异步的，回调可能在循环结束后才到达
 
-        // 通知处理开始事件
-        int32_t progress = 0;
-        notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_START, currentSessionId_,
-                          progress, 0, config_.frameCount, "Processing started"});
-
-        OH_LOG_INFO(LOG_APP, "Capture completed, switched to PROCESSING state");
-    }
-
-    OH_LOG_INFO(LOG_APP, "Capture loop ended");
+    CM_LOG_INFO("[CAPTURE_LOOP_END] All capture requests sent, waiting for callbacks");
 }
 
 void CaptureManager::captureNextFrame() {
@@ -447,13 +476,15 @@ void CaptureManager::captureNextFrame() {
 }
 
 void CaptureManager::processTask(ImageTask&& task) {
-    if (state_.load() == CaptureState::CANCELLED) {
-        OH_LOG_INFO(LOG_APP, "Burst cancelled, skipping task %{public}d", task.taskId);
+    CaptureState currentState = state_.load();
+
+    if (currentState == CaptureState::CANCELLED) {
+        CM_LOG_INFO("[PROCESS_TASK_SKIP] taskId=%{public}d, burst cancelled", task.taskId);
         return;
     }
 
-    OH_LOG_INFO(LOG_APP, "Processing task %{public}d, buffer size: %{public}zu, %{public}dx%{public}d",
-                task.taskId, task.size, task.width, task.height);
+    CM_LOG_INFO("[PROCESS_TASK_BEGIN] taskId=%{public}d, size=%{public}zu, %{public}dx%{public}d, state=%{public}d",
+                task.taskId, task.size, task.width, task.height, static_cast<int>(currentState));
 
     // 第一帧: 初始化处理会话
     if (task.isFirst) {
@@ -461,8 +492,11 @@ void CaptureManager::processTask(ImageTask&& task) {
         imageWidth_ = task.width;
         imageHeight_ = task.height;
 
+        CM_LOG_INFO("[PROCESS_TASK_INIT] Initializing processor, frameCount=%{public}d, size=%{public}dx%{public}d",
+                    config_.frameCount, imageWidth_, imageHeight_);
+
         if (!processor_->initStacking(config_.frameCount, imageWidth_, imageHeight_)) {
-            OH_LOG_ERROR(LOG_APP, "Failed to init processing session");
+            CM_LOG_ERROR("[PROCESS_TASK_INIT_FAILED] Failed to init processing session");
             state_.store(CaptureState::ERROR);
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to initialize processing session";
@@ -474,13 +508,14 @@ void CaptureManager::processTask(ImageTask&& task) {
 
             return;
         }
+        CM_LOG_INFO("[PROCESS_TASK_INIT_OK] Processor initialized successfully");
     }
 
     // 处理帧（原始图像数据，由 processor 内部解码）
     // 假设相机输出为 JPEG 格式
     if (!processor_->processFrame(task.taskId, task.buffer, task.size,
                                    task.width, task.height, ImageFormat::JPEG, task.isFirst)) {
-        OH_LOG_ERROR(LOG_APP, "Failed to process frame %{public}d", task.taskId);
+        CM_LOG_ERROR("[PROCESS_TASK_FRAME_FAILED] Failed to process frame %{public}d", task.taskId);
     }
 
     int32_t processed = processCount_.fetch_add(1) + 1;
@@ -489,6 +524,9 @@ void CaptureManager::processTask(ImageTask&& task) {
 
     // 计算进度百分比
     int32_t progressPercent = (processed * 100) / config_.frameCount;
+
+    CM_LOG_INFO("[PROCESS_TASK_PROGRESS] taskId=%{public}d, processed=%{public}d/%{public}d (%{public}d%%)",
+                task.taskId, processed, config_.frameCount, progressPercent);
 
     // 通知处理进度事件
     notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_PROGRESS, currentSessionId_,
@@ -505,7 +543,7 @@ void CaptureManager::processTask(ImageTask&& task) {
 
     // 检查是否全部处理完成
     if (processed >= config_.frameCount) {
-        OH_LOG_INFO(LOG_APP, "All frames processed, finalizing... processed=%{public}d, frameCount=%{public}d",
+        CM_LOG_INFO("[PROCESS_TASK_FINALIZE] All frames processed, finalizing... processed=%{public}d, frameCount=%{public}d",
                     processed, config_.frameCount);
 
         // 获取最终结果
@@ -513,7 +551,7 @@ void CaptureManager::processTask(ImageTask&& task) {
         size_t finalSize = 0;
 
         if (processor_->finalize(&finalBuffer, &finalSize)) {
-            OH_LOG_INFO(LOG_APP, "Finalize succeeded, finalSize=%{public}zu, calling notifyImage", finalSize);
+            CM_LOG_INFO("[PROCESS_TASK_FINALIZE_OK] finalSize=%{public}zu", finalSize);
             // 通知最终结果
             notifyImage(finalBuffer, finalSize, true);
 
@@ -525,7 +563,7 @@ void CaptureManager::processTask(ImageTask&& task) {
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_END, currentSessionId_,
                               100, config_.frameCount, config_.frameCount, "Processing completed successfully"});
         } else {
-            OH_LOG_ERROR(LOG_APP, "Failed to finalize processing result");
+            CM_LOG_ERROR("[PROCESS_TASK_FINALIZE_FAILED] Failed to finalize processing result");
             state_.store(CaptureState::ERROR);
             progress_.state = CaptureState::ERROR;
             progress_.message = "Failed to finalize processing result";
@@ -545,7 +583,7 @@ void CaptureManager::notifyProgress() {
 }
 
 void CaptureManager::notifyImage(void* buffer, size_t size, bool isFinal) {
-    OH_LOG_INFO(LOG_APP, "notifyImage: buffer=%{public}p, size=%{public}zu, isFinal=%{public}d, callback=%{public}s",
+    CM_LOG_INFO("[NOTIFY_IMAGE] buffer=%{public}p, size=%{public}zu, isFinal=%{public}d, callback=%{public}s",
                 buffer, size, isFinal, imageCallback_ ? "set" : "null");
     if (imageCallback_) {
         imageCallback_(progress_.sessionId, buffer, size, isFinal);
