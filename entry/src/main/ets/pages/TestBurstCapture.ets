@@ -93,6 +93,9 @@ struct TestBurstCapture {
 
   // 处理连拍图像（中间预览 + 最终结果）
   async processPhotoBuffer(buffer: ArrayBuffer, isFinal: boolean): Promise<void> {
+    if (!isFinal) {
+      return
+    }
     let imageSource: image.ImageSource | undefined;
     try {
       imageSource = image.createImageSource(buffer);

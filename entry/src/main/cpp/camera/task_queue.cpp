@@ -95,10 +95,15 @@ void TaskQueue::stop() {
     TQ_LOG_INFO("[STOP_BEGIN] callerThread=%{public}s, running=%{public}d, stopped=%{public}d",
                 callerThread.c_str(), running_.load(), stopped_.load());
 
+    // 先设置停止标志
     stopped_.store(true);
     running_.store(false);
 
-    TQ_LOG_DEBUG("[STOP_NOTIFY] notifying all waiting threads");
+    // 在持有锁的情况下通知，确保消费者线程不会错过信号
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        TQ_LOG_DEBUG("[STOP_NOTIFY] notifying all waiting threads");
+    }
     cv_.notify_all();
 
     if (consumerThread_.joinable()) {
@@ -192,7 +197,14 @@ void TaskQueue::consumerLoop() {
             TQ_LOG_INFO("[PROCESS_BEGIN] taskId=%{public}d, processedCount=%{public}lld, consumerThread=%{public}s",
                         taskId, (long long)processedCount, consumerThread.c_str());
 
-            handler_(std::move(task));
+            try {
+                handler_(std::move(task));
+            } catch (const std::exception& e) {
+                TQ_LOG_ERROR("[PROCESS_EXCEPTION] taskId=%{public}d, exception: %{public}s",
+                            taskId, e.what());
+            } catch (...) {
+                TQ_LOG_ERROR("[PROCESS_EXCEPTION] taskId=%{public}d, unknown exception", taskId);
+            }
 
             TQ_LOG_INFO("[PROCESS_END] taskId=%{public}d, consumerThread=%{public}s",
                         taskId, consumerThread.c_str());

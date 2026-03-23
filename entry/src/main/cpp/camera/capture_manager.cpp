@@ -216,61 +216,105 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
 }
 
 void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // 用于在锁外调用的回调数据
+    struct CallbackData {
+        bool shouldCallback = false;
+        std::string sessionId;
+        PhotoEventCallback photoEventCallback;
+        SinglePhotoCallback singlePhotoCallback;
+    } callbackData;
 
-    CaptureState currentState = state_.load();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    CM_LOG_INFO("[SINGLE_CAPTURE_BEGIN] sessionId=%{public}s, size=%{public}zu, %{public}ux%{public}u, state=%{public}d",
-                currentSessionId_.c_str(), size, width, height, static_cast<int>(currentState));
+        CaptureState currentState = state_.load();
 
-    if (currentState != CaptureState::SINGLE_CAPTURING) {
-        CM_LOG_WARN("[SINGLE_CAPTURE_FAILED] Not in SINGLE_CAPTURING state, current: %{public}d",
-                    static_cast<int>(currentState));
-        return;
+        CM_LOG_INFO("[SINGLE_CAPTURE_BEGIN] sessionId=%{public}s, size=%{public}zu, %{public}ux%{public}u, state=%{public}d",
+                    currentSessionId_.c_str(), size, width, height, static_cast<int>(currentState));
+
+        if (currentState != CaptureState::SINGLE_CAPTURING) {
+            CM_LOG_WARN("[SINGLE_CAPTURE_FAILED] Not in SINGLE_CAPTURING state, current: %{public}d",
+                        static_cast<int>(currentState));
+            return;
+        }
+
+        // 准备回调数据（在锁外调用）
+        callbackData.shouldCallback = true;
+        callbackData.sessionId = currentSessionId_;
+        callbackData.photoEventCallback = photoEventCallback_;
+        callbackData.singlePhotoCallback = singlePhotoCallback_;
+
+        // 恢复空闲状态
+        state_.store(CaptureState::IDLE);
+        CM_LOG_INFO("[SINGLE_CAPTURE_END] sessionId=%{public}s, state=IDLE", currentSessionId_.c_str());
+    }  // 释放锁
+
+    // 在锁外调用回调
+    if (callbackData.shouldCallback) {
+        // 通知拍照结束事件
+        if (callbackData.photoEventCallback) {
+            callbackData.photoEventCallback({PhotoEventType::CAPTURE_END, callbackData.sessionId,
+                                            -1, "Single photo captured successfully"});
+        }
+
+        // 直接回调，不经过队列
+        if (callbackData.singlePhotoCallback) {
+            callbackData.singlePhotoCallback(callbackData.sessionId, buffer, size, width, height);
+        }
     }
-
-    // 通知拍照结束事件
-    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, -1, "Single photo captured successfully"});
-
-    // 直接回调，不经过队列
-    if (singlePhotoCallback_) {
-        singlePhotoCallback_(currentSessionId_, buffer, size, width, height);
-    } else {
-        CM_LOG_WARN("[SINGLE_CAPTURE_NO_CALLBACK] No single photo callback set");
-    }
-
-    // 恢复空闲状态
-    state_.store(CaptureState::IDLE);
-    CM_LOG_INFO("[SINGLE_CAPTURE_END] sessionId=%{public}s, state=IDLE", currentSessionId_.c_str());
 }
 
 // 拍照错误通知（由 ExpoCamera 调用，异步通知相机硬件错误）
 void CaptureManager::onPhotoError(int32_t errorCode) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // 用于在锁外调用的回调数据
+    struct CallbackData {
+        bool shouldCallback = false;
+        std::string sessionId;
+        PhotoEventCallback photoEventCallback;
+        PhotoErrorCallback photoErrorCallback;
+        int32_t errorCode = 0;
+    } callbackData;
 
-    CaptureState currentState = state_.load();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    CM_LOG_ERROR("[PHOTO_ERROR] sessionId=%{public}s, errorCode=%{public}d, currentState=%{public}d",
-                currentSessionId_.c_str(), errorCode, static_cast<int>(currentState));
+        CaptureState currentState = state_.load();
 
-    // 只有在拍摄状态下才处理错误
-    if (currentState != CaptureState::SINGLE_CAPTURING &&
-        currentState != CaptureState::BURST_CAPTURING) {
-        CM_LOG_WARN("[PHOTO_ERROR_IGNORED] Not in capturing state, ignoring error");
-        return;
+        CM_LOG_ERROR("[PHOTO_ERROR] sessionId=%{public}s, errorCode=%{public}d, currentState=%{public}d",
+                    currentSessionId_.c_str(), errorCode, static_cast<int>(currentState));
+
+        // 只有在拍摄状态下才处理错误
+        if (currentState != CaptureState::SINGLE_CAPTURING &&
+            currentState != CaptureState::BURST_CAPTURING) {
+            CM_LOG_WARN("[PHOTO_ERROR_IGNORED] Not in capturing state, ignoring error");
+            return;
+        }
+
+        // 准备回调数据（在锁外调用）
+        callbackData.shouldCallback = true;
+        callbackData.sessionId = currentSessionId_;
+        callbackData.photoEventCallback = photoEventCallback_;
+        callbackData.photoErrorCallback = photoErrorCallback_;
+        callbackData.errorCode = errorCode;
+
+        // 恢复空闲状态
+        state_.store(CaptureState::IDLE);
+        CM_LOG_INFO("[PHOTO_ERROR_END] State reset to IDLE");
+    }  // 释放锁
+
+    // 在锁外调用回调
+    if (callbackData.shouldCallback) {
+        // 通知拍照失败事件
+        if (callbackData.photoEventCallback) {
+            callbackData.photoEventCallback({PhotoEventType::CAPTURE_FAILED, callbackData.sessionId,
+                                            -1, "Photo capture failed"});
+        }
+
+        // 通知错误回调
+        if (callbackData.photoErrorCallback) {
+            callbackData.photoErrorCallback(callbackData.sessionId, callbackData.errorCode);
+        }
     }
-
-    // 通知拍照失败事件
-    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, currentSessionId_, -1, "Photo capture failed"});
-
-    // 通知错误回调
-    if (photoErrorCallback_) {
-        photoErrorCallback_(currentSessionId_, errorCode);
-    }
-
-    // 恢复空闲状态
-    state_.store(CaptureState::IDLE);
-    CM_LOG_INFO("[PHOTO_ERROR_END] State reset to IDLE");
 }
 
 // ==================== 连拍 ====================
@@ -366,71 +410,109 @@ void CaptureManager::cancelBurst() {
 }
 
 void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t width, uint32_t height) {
-    CaptureState currentState = state_.load();
+    // 用于在锁外调用的回调数据
+    struct CallbackData {
+        bool shouldProcess = false;
+        int32_t frameIndex = -1;
+        bool isLastFrame = false;
+        std::string sessionId;
+        BurstProgress progress;
+        PhotoEventCallback photoEventCallback;
+        ProcessEventCallback processEventCallback;
+        BurstProgressCallback progressCallback;
+        int32_t frameCount = 0;
+    } callbackData;
 
-    if (currentState == CaptureState::CANCELLED) {
-        CM_LOG_INFO("[BURST_CAPTURE_IGNORED] Burst cancelled, ignoring captured photo");
-        return;
-    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    if (currentState != CaptureState::BURST_CAPTURING) {
-        CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Not in BURST_CAPTURING state, currentState=%{public}d",
-                    static_cast<int>(currentState));
-        return;
-    }
+        CaptureState currentState = state_.load();
 
-    int32_t frameIndex = captureCount_.fetch_add(1);
+        if (currentState == CaptureState::CANCELLED) {
+            CM_LOG_INFO("[BURST_CAPTURE_IGNORED] Burst cancelled, ignoring captured photo");
+            return;
+        }
 
-    if (frameIndex >= config_.frameCount) {
-        // 已拍摄足够帧数
-        CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Already captured enough frames, frameIndex=%{public}d >= frameCount=%{public}d",
-                    frameIndex, config_.frameCount);
-        return;
-    }
+        if (currentState != CaptureState::BURST_CAPTURING) {
+            CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Not in BURST_CAPTURING state, currentState=%{public}d",
+                        static_cast<int>(currentState));
+            return;
+        }
 
-    CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
-                frameIndex + 1, config_.frameCount, size, width, height);
+        int32_t frameIndex = captureCount_.fetch_add(1);
 
-    // 复制 buffer
-    void* copyBuffer = malloc(size);
-    if (!copyBuffer) {
-        CM_LOG_ERROR("[BURST_CAPTURE_ALLOC_FAILED] Failed to allocate buffer for frame %{public}d", frameIndex);
-        return;
-    }
-    memcpy(copyBuffer, buffer, size);
+        if (frameIndex >= config_.frameCount) {
+            CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Already captured enough frames, frameIndex=%{public}d >= frameCount=%{public}d",
+                        frameIndex, config_.frameCount);
+            return;
+        }
 
-    // 创建任务并入队
-    ImageTask task;
-    task.taskId = frameIndex;
-    task.buffer = copyBuffer;
-    task.size = size;
-    task.width = width;
-    task.height = height;
-    task.isFirst = (frameIndex == 0);
+        CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
+                    frameIndex + 1, config_.frameCount, size, width, height);
 
-    taskQueue_->enqueue(std::move(task));
+        // 复制 buffer
+        void* copyBuffer = malloc(size);
+        if (!copyBuffer) {
+            CM_LOG_ERROR("[BURST_CAPTURE_ALLOC_FAILED] Failed to allocate buffer for frame %{public}d", frameIndex);
+            return;
+        }
+        memcpy(copyBuffer, buffer, size);
 
-    // 更新进度
-    progress_.capturedFrames = frameIndex + 1;
-    notifyProgress();
+        // 创建任务并入队
+        ImageTask task;
+        task.taskId = frameIndex;
+        task.buffer = copyBuffer;
+        task.size = size;
+        task.width = width;
+        task.height = height;
+        task.isFirst = (frameIndex == 0);
 
-    // 通知拍照进度事件
-    notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_END, currentSessionId_, frameIndex,
-                                           "Frame captured"});
+        taskQueue_->enqueue(std::move(task));
 
-    // 最后一帧捕获完成，切换到处理状态
-    if (frameIndex + 1 == config_.frameCount) {
-        CM_LOG_INFO("[BURST_CAPTURE_ALL_DONE] All %{public}d frames captured, switching to PROCESSING state",
-                    config_.frameCount);
+        // 更新进度
+        progress_.capturedFrames = frameIndex + 1;
 
-        state_.store(CaptureState::PROCESSING);
-        progress_.state = CaptureState::PROCESSING;
-        progress_.message = "All frames captured, processing stacked image";
-        notifyProgress();
+        // 准备回调数据（在锁外调用）
+        callbackData.shouldProcess = true;
+        callbackData.frameIndex = frameIndex;
+        callbackData.isLastFrame = (frameIndex + 1 == config_.frameCount);
+        callbackData.sessionId = currentSessionId_;
+        callbackData.progress = progress_;
+        callbackData.photoEventCallback = photoEventCallback_;
+        callbackData.processEventCallback = processEventCallback_;
+        callbackData.progressCallback = progressCallback_;
+        callbackData.frameCount = config_.frameCount;
 
-        // 通知处理开始事件
-        notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_START, currentSessionId_,
-                          0, 0, config_.frameCount, "Processing started"});
+        // 最后一帧捕获完成，切换到处理状态
+        if (callbackData.isLastFrame) {
+            CM_LOG_INFO("[BURST_CAPTURE_ALL_DONE] All %{public}d frames captured, switching to PROCESSING state",
+                        config_.frameCount);
+
+            state_.store(CaptureState::PROCESSING);
+            progress_.state = CaptureState::PROCESSING;
+            progress_.message = "All frames captured, processing stacked image";
+            callbackData.progress = progress_;
+        }
+    }  // 释放锁
+
+    // 在锁外调用回调
+    if (callbackData.shouldProcess) {
+        // 进度回调
+        if (callbackData.progressCallback) {
+            callbackData.progressCallback(callbackData.progress);
+        }
+
+        // 拍照事件回调
+        if (callbackData.photoEventCallback) {
+            callbackData.photoEventCallback({PhotoEventType::CAPTURE_END, callbackData.sessionId,
+                                            callbackData.frameIndex, "Frame captured"});
+        }
+
+        // 最后一帧：处理开始事件
+        if (callbackData.isLastFrame && callbackData.processEventCallback) {
+            callbackData.processEventCallback({ProcessEventType::PROCESS_START, callbackData.sessionId,
+                                              0, 0, callbackData.frameCount, "Processing started"});
+        }
     }
 }
 
