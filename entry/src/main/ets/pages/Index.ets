@@ -49,6 +49,13 @@ struct Index {
           'pages/TestBurstCapture'
         )
 
+        // 模式切换测试
+        this.buildTestEntry(
+          '模式切换测试',
+          '单拍/连拍模式切换、PhotoOutput 重配置',
+          'pages/TestCaptureMode'
+        )
+
         // 完整功能测试（双 Slot）
         this.buildTestEntry(
           '完整功能测试',

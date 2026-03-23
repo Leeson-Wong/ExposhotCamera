@@ -1110,6 +1110,48 @@ static napi_value IsPhotoOutputReady(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// 切换拍摄模式
+static napi_value SwitchCaptureMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "Requires 1 argument: mode (0=SINGLE, 1=BURST)");
+        return nullptr;
+    }
+
+    int32_t modeValue;
+    napi_get_value_int32(env, args[0], &modeValue);
+
+    CaptureMode mode = (modeValue == 1) ? CaptureMode::BURST : CaptureMode::SINGLE;
+
+    ExpoCamera& camera = ExpoCamera::getInstance();
+    Camera_ErrorCode err = camera.switchCaptureMode(mode);
+
+    napi_value result;
+    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    return result;
+}
+
+// 获取当前拍摄模式
+static napi_value GetCaptureMode(napi_env env, napi_callback_info info) {
+    ExpoCamera& camera = ExpoCamera::getInstance();
+
+    napi_value result;
+    napi_create_int32(env, static_cast<int32_t>(camera.getCaptureMode()), &result);
+    return result;
+}
+
+// 检查是否可以切换模式
+static napi_value CanSwitchMode(napi_env env, napi_callback_info info) {
+    ExpoCamera& camera = ExpoCamera::getInstance();
+
+    napi_value result;
+    napi_get_boolean(env, camera.canSwitchMode(), &result);
+    return result;
+}
+
 // 注册观察者
 static napi_value RegisterObserver(napi_env env, napi_callback_info info) {
     size_t argc = 2;
@@ -1791,6 +1833,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"registerPhotoEventCallback", nullptr, RegisterPhotoEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"registerProcessEventCallback", nullptr, RegisterProcessEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isPhotoOutputReady", nullptr, IsPhotoOutputReady, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // 拍摄模式切换
+        {"switchCaptureMode", nullptr, SwitchCaptureMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCaptureMode", nullptr, GetCaptureMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"canSwitchMode", nullptr, CanSwitchMode, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZoomRatio", nullptr, SetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getZoomRatio", nullptr, GetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getZoomRatioRange", nullptr, GetZoomRatioRange, nullptr, nullptr, nullptr, napi_default, nullptr},

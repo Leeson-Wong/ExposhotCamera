@@ -185,6 +185,39 @@ export const takePhoto: () => TakePhotoResult;
  */
 export const isPhotoOutputReady: () => boolean;
 
+// ==================== 拍摄模式切换 ====================
+
+/**
+ * 拍摄模式枚举
+ */
+export const enum CaptureMode {
+    SINGLE = 0,  // 单拍模式（高分辨率）
+    BURST = 1    // 连拍模式（中等分辨率，平衡性能）
+}
+
+/**
+ * 切换拍摄模式
+ * 会重新配置 PhotoOutput，选择适合的分辨率
+ * 单拍模式：选择最高分辨率
+ * 连拍模式：选择接近 1080p 的分辨率
+ * @param mode 目标模式 (CaptureMode.SINGLE 或 CaptureMode.BURST)
+ * @returns 0 成功，其他值表示错误码
+ */
+export const switchCaptureMode: (mode: CaptureMode) => number;
+
+/**
+ * 获取当前拍摄模式
+ * @returns 当前模式
+ */
+export const getCaptureMode: () => CaptureMode;
+
+/**
+ * 检查是否可以切换模式
+ * 需要在预览已启动且没有拍摄进行中时才能切换
+ * @returns true 可以切换，false 不可切换
+ */
+export const canSwitchMode: () => boolean;
+
 // ==================== 缩放控制 ====================
 
 /**

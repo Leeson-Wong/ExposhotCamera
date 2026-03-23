@@ -1153,6 +1153,211 @@ void ExpoCamera::setPhotoErrorCallback(PhotoErrorCallback callback) {
     OH_LOG_INFO(LOG_APP, "Photo error callback %{public}s", callback ? "registered" : "cleared");
 }
 
+// ==================== 拍摄模式管理 ====================
+
+bool ExpoCamera::canSwitchMode() const {
+    return initialized_ && previewing_ && captureSession_ != nullptr;
+}
+
+Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
+    if (!canSwitchMode()) {
+        OH_LOG_ERROR(LOG_APP, "Cannot switch mode: not initialized or not previewing");
+        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
+    }
+
+    if (currentMode_ == mode) {
+        OH_LOG_INFO(LOG_APP, "Already in mode %{public}d, skip", static_cast<int>(mode));
+        return CAMERA_OK;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Switching capture mode: %{public}d -> %{public}d",
+                static_cast<int>(currentMode_), static_cast<int>(mode));
+
+    Camera_ErrorCode err;
+
+    // 1. 停止 Session
+    err = OH_CaptureSession_Stop(captureSession_);
+    if (err != CAMERA_OK) {
+        OH_LOG_WARN(LOG_APP, "Stop session failed: %{public}d", err);
+    }
+
+    // 2. 开始配置
+    err = OH_CaptureSession_BeginConfig(captureSession_);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "BeginConfig failed: %{public}d", err);
+        // 尝试恢复
+        OH_CaptureSession_Start(captureSession_);
+        return err;
+    }
+
+    // 3. 从 Session 移除旧的 PhotoOutput
+    if (photoOutput_ && photoOutputAdded_) {
+        err = OH_CaptureSession_RemovePhotoOutput(captureSession_, photoOutput_);
+        if (err != CAMERA_OK) {
+            OH_LOG_WARN(LOG_APP, "RemovePhotoOutput failed: %{public}d", err);
+        }
+        photoOutputAdded_ = false;
+    }
+
+    // 4. 释放旧的 PhotoOutput
+    if (photoOutput_) {
+        err = OH_PhotoOutput_Release(photoOutput_);
+        if (err != CAMERA_OK) {
+            OH_LOG_WARN(LOG_APP, "PhotoOutput release failed: %{public}d", err);
+        }
+        photoOutput_ = nullptr;
+    }
+
+    // 5. 选择新模式对应的 photoProfile
+    int32_t profileIndex = selectPhotoProfileForMode(mode);
+
+    // 6. 获取输出能力
+    Camera_OutputCapability* outputCapability = nullptr;
+    err = OH_CameraManager_GetSupportedCameraOutputCapabilityWithSceneMode(
+        cameraManager_, &cameras_[currentCameraIndex_],
+        Camera_SceneMode::NORMAL_PHOTO, &outputCapability);
+    if (err != CAMERA_OK) {
+        OH_LOG_WARN(LOG_APP, "GetCapabilityWithSceneMode failed: %{public}d, fallback", err);
+        err = OH_CameraManager_GetSupportedCameraOutputCapability(
+            cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+        if (err != CAMERA_OK) {
+            OH_LOG_ERROR(LOG_APP, "GetCapability failed: %{public}d", err);
+            OH_CaptureSession_CommitConfig(captureSession_);
+            OH_CaptureSession_Start(captureSession_);
+            return err;
+        }
+    }
+
+    if (outputCapability->photoProfilesSize == 0) {
+        OH_LOG_ERROR(LOG_APP, "No photo profiles");
+        OH_CaptureSession_CommitConfig(captureSession_);
+        OH_CaptureSession_Start(captureSession_);
+        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
+    }
+
+    // 确保索引有效
+    if (profileIndex < 0 || profileIndex >= static_cast<int32_t>(outputCapability->photoProfilesSize)) {
+        profileIndex = 0;
+    }
+
+    Camera_Profile* photoProfile = outputCapability->photoProfiles[profileIndex];
+    OH_LOG_INFO(LOG_APP, "Selected profile: %{public}ux%{public}u",
+                photoProfile->size.width, photoProfile->size.height);
+
+    // 7. 创建新的 PhotoOutput
+    err = OH_CameraManager_CreatePhotoOutputWithoutSurface(cameraManager_, photoProfile, &photoOutput_);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "CreatePhotoOutput failed: %{public}d", err);
+        OH_CaptureSession_CommitConfig(captureSession_);
+        OH_CaptureSession_Start(captureSession_);
+        return err;
+    }
+
+    // 8. 注册回调
+    err = OH_PhotoOutput_RegisterPhotoAvailableCallback(photoOutput_, ExpoCamera::onPhotoAvailable);
+    if (err != CAMERA_OK) {
+        OH_LOG_WARN(LOG_APP, "RegisterCallback failed: %{public}d", err);
+    }
+
+    // 9. 添加到 Session
+    err = OH_CaptureSession_AddPhotoOutput(captureSession_, photoOutput_);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "AddPhotoOutput failed: %{public}d", err);
+        OH_PhotoOutput_Release(photoOutput_);
+        photoOutput_ = nullptr;
+        OH_CaptureSession_CommitConfig(captureSession_);
+        OH_CaptureSession_Start(captureSession_);
+        return err;
+    }
+    photoOutputAdded_ = true;
+
+    // 10. 提交配置
+    err = OH_CaptureSession_CommitConfig(captureSession_);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "CommitConfig failed: %{public}d", err);
+        return err;
+    }
+
+    // 11. 启动 Session
+    err = OH_CaptureSession_Start(captureSession_);
+    if (err != CAMERA_OK) {
+        OH_LOG_ERROR(LOG_APP, "Start session failed: %{public}d", err);
+        return err;
+    }
+
+    currentMode_ = mode;
+    OH_LOG_INFO(LOG_APP, "Capture mode switched to %{public}d", static_cast<int>(mode));
+
+    return CAMERA_OK;
+}
+
+int32_t ExpoCamera::selectPhotoProfileForMode(CaptureMode mode) {
+    Camera_OutputCapability* outputCapability = nullptr;
+    Camera_ErrorCode err = OH_CameraManager_GetSupportedCameraOutputCapability(
+        cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
+    if (err != CAMERA_OK || outputCapability == nullptr) {
+        OH_LOG_WARN(LOG_APP, "GetCapability failed, use default");
+        return 0;
+    }
+
+    if (outputCapability->photoProfilesSize == 0) {
+        return 0;
+    }
+
+    // 打印可用 profiles
+    OH_LOG_INFO(LOG_APP, "Photo profiles (%{public}u):", outputCapability->photoProfilesSize);
+    for (uint32_t i = 0; i < outputCapability->photoProfilesSize; i++) {
+        Camera_Profile* p = outputCapability->photoProfiles[i];
+        OH_LOG_INFO(LOG_APP, "  [%{public}u] %{public}ux%{public}u", i, p->size.width, p->size.height);
+    }
+
+    int32_t selectedIndex = 0;
+
+    switch (mode) {
+        case CaptureMode::SINGLE:
+            // 单拍: 选最高分辨率
+            {
+                uint32_t maxPixels = 0;
+                for (uint32_t i = 0; i < outputCapability->photoProfilesSize; i++) {
+                    Camera_Profile* p = outputCapability->photoProfiles[i];
+                    uint32_t pixels = p->size.width * p->size.height;
+                    if (pixels > maxPixels) {
+                        maxPixels = pixels;
+                        selectedIndex = static_cast<int32_t>(i);
+                    }
+                }
+            }
+            break;
+
+        case CaptureMode::BURST:
+            // 连拍: 选接近 1080p 的分辨率（平衡性能和质量）
+            {
+                uint32_t targetPixels = 1920 * 1080;
+                uint32_t minDiff = UINT32_MAX;
+                for (uint32_t i = 0; i < outputCapability->photoProfilesSize; i++) {
+                    Camera_Profile* p = outputCapability->photoProfiles[i];
+                    uint32_t pixels = p->size.width * p->size.height;
+                    // 只考虑 4K 以下的
+                    if (pixels <= 3840 * 2160) {
+                        uint32_t diff = (pixels > targetPixels) ? (pixels - targetPixels) : (targetPixels - pixels);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            selectedIndex = static_cast<int32_t>(i);
+                        }
+                    }
+                }
+                // 如果没找到，用第一个
+                if (minDiff == UINT32_MAX && outputCapability->photoProfilesSize > 0) {
+                    selectedIndex = 0;
+                }
+            }
+            break;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Selected profile index: %{public}d", selectedIndex);
+    return selectedIndex;
+}
+
 //void ExpoCamera::notifyState(const std::string& state, const std::string& message) {
 //    if (stateCallback_) {
 //        stateCallback_(state, message);

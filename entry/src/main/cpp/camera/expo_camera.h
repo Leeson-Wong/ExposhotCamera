@@ -16,6 +16,13 @@
 #include "ohcamera/camera_manager.h"
 #include <multimedia/image_framework/image/image_native.h>
 
+// ==================== 拍摄模式定义 ====================
+
+enum class CaptureMode {
+    SINGLE = 0,  // 单拍模式
+    BURST = 1    // 连拍模式
+};
+
 // ==================== 回调类型定义 ====================
 
 // 预览流变化观察者回调
@@ -81,6 +88,18 @@ public:
     bool isPreviewing() const { return previewing_; }
     bool isPhotoOutputReady() const { return photoOutput_ != nullptr; }
 
+    // ==================== 拍摄模式管理 ====================
+
+    // 切换拍摄模式（会重新配置 PhotoOutput）
+    // 必须在预览已启动且没有拍摄进行中时调用
+    Camera_ErrorCode switchCaptureMode(CaptureMode mode);
+
+    // 获取当前拍摄模式
+    CaptureMode getCaptureMode() const { return currentMode_; }
+
+    // 检查是否可以切换模式
+    bool canSwitchMode() const;
+
     // 观察者管理（新接口）
     // 注册观察者，返回 slotId
     std::string registerObserver(const std::string& surfaceId, BindPreviewObserverCallback bindCallback, void* userData = nullptr);
@@ -113,6 +132,9 @@ private:
     Camera_ErrorCode createCaptureSession();
     Camera_ErrorCode createPreviewOutput(const std::string& surfaceId);
     Camera_ErrorCode createPhotoOutput();
+
+    // 模式切换相关
+    int32_t selectPhotoProfileForMode(CaptureMode mode);
 
     // 不加锁的内部版本（供内部调用）
     Camera_ErrorCode startPreviewInternal(const std::string& surfaceId);
@@ -149,6 +171,9 @@ private:
     bool previewing_ = false;
     bool photoOutputAdded_ = false;
     std::mutex mutex_;
+
+    // 拍摄模式
+    CaptureMode currentMode_ = CaptureMode::SINGLE;
 
     // 观察者列表
     std::vector<PreviewObserver> observers_;
