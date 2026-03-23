@@ -6,18 +6,91 @@
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        ExpoCamera SDK                                 │
 │                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │                   CaptureManager (业务层)                        ││
+│  │                   统一入口、流程控制、状态管理                      ││
+│  └───────────────────────────┬─────────────────────────────────────┘│
+│                              │                                       │
+│              ┌───────────────┼───────────────┐                       │
+│              ▼               ▼               ▼                       │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐              │
-│  │ 相机控制     │    │ 拍摄管理     │    │ 文件存储     │              │
-│  │ ExpoCamera  │    │CaptureManager│    │ FileSaver   │              │
+│  │ 相机控制     │    │ 文件存储     │    │ 图像处理     │              │
+│  │ ExpoCamera  │    │ FileSaver   │    │ImageProcessor│              │
+│  │ (硬件层)     │    │             │    │ + TaskQueue  │              │
 │  └─────────────┘    └─────────────┘    └─────────────┘              │
-│         │                  │                  │                      │
-│         └──────────────────┼──────────────────┘                      │
-│                            ▼                                         │
-│                   ┌─────────────┐                                    │
-│                   │ 图像处理     │                                    │
-│                   │ImageProcessor│                                   │
-│                   └─────────────┘                                    │
 └──────────────────────────────────────────────────────────────────────┘
+
+依赖方向（单向）: CaptureManager → ExpoCamera / FileSaver / ImageProcessor
+```
+
+---
+
+## 0. 核心架构原则
+
+### 0.1 依赖方向
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         NAPI Layer                                  │
+│                    napi_expo_camera.cpp                             │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CaptureManager (业务层)                          │
+│                                                                     │
+│  职责：统一入口、初始化下层组件、注册回调、流程控制                      │
+│                                                                     │
+│  init() 时：                                                        │
+│    ├→ ExpoCamera::init()          // 初始化相机                      │
+│    ├→ FileSaver::init()           // 初始化文件存储                   │
+│    └→ 注册回调到 ExpoCamera        // 建立数据通道                    │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                 ▼
+┌──────────────────┐  ┌──────────────┐  ┌──────────────────┐
+│   ExpoCamera     │  │  FileSaver   │  │  ImageProcessor  │
+│   (硬件层)        │  │              │  │  + TaskQueue     │
+│                  │  │              │  │                  │
+│  不依赖任何上层   │  │              │  │                  │
+│  通过回调通知    │  │              │  │                  │
+└──────────────────┘  └──────────────┘  └──────────────────┘
+```
+
+### 0.2 初始化流程
+
+```
+initCamera() [NAPI]
+      │
+      ▼
+CaptureManager::init()
+      │
+      ├─→ ExpoCamera::init()           // 初始化相机硬件
+      │
+      ├─→ FileSaver::init()            // 初始化文件存储
+      │
+      ├─→ setPhotoCapturedCallback()   // 注册照片回调到 ExpoCamera
+      │
+      ├─→ setPhotoErrorCallback()      // 注册错误回调到 ExpoCamera
+      │
+      └─→ TaskQueue::start()           // 启动处理队列
+```
+
+### 0.3 数据回调流程
+
+```
+ExpoCamera::onPhotoAvailable()
+      │
+      ▼
+photoCapturedCallback_ (回调)
+      │
+      ▼
+CaptureManager lambda
+      │
+      ├─→ currentMode_ == SINGLE ? onSinglePhotoCaptured()
+      │
+      └─→ currentMode_ == BURST  ? onBurstPhotoCaptured()
 ```
 
 ---
@@ -73,8 +146,8 @@
 
 | 类 | 职责 | 不负责 |
 |---|------|--------|
-| **ExpoCamera** | 相机控制：初始化、预览、Surface 切换、参数设置、提供 PhotoOutput | 拍照触发、图像处理、文件IO |
-| **CaptureManager** | 拍摄管理：单次拍照、连拍协调、状态管理、帧收集、协调处理流程 | 图像处理、文件IO |
+| **CaptureManager** | 统一入口：初始化下层组件、注册回调、单次拍照、连拍协调、状态管理、帧收集、协调处理流程 | 图像处理、文件IO |
+| **ExpoCamera** | 相机控制：初始化、预览、Surface 切换、参数设置、提供 PhotoOutput、通过回调通知上层 | 拍照触发、图像处理、文件IO、直接调用 CaptureManager |
 | **ImageProcessor** | 图像处理：解码、对齐、堆叠、降噪、色调映射、编码 | 文件IO、拍照触发 |
 | **TaskQueue** | 异步调度：队列管理、线程消费 | 图像处理逻辑 |
 | **FileSaver** | 纯IO：文件写入、路径管理、平台存储API | 图像处理、编码 |
@@ -151,13 +224,19 @@ bool isCaptureActive() const {
          │
          ├─── state = SINGLE_CAPTURING
          │
-         ├─── OH_PhotoOutput_Capture()
+         ├─── OH_PhotoOutput_Capture() (通过 ExpoCamera 获取 PhotoOutput)
          │         │
          │         ├─── 失败 ──→ 返回 { errorCode: HarmonyOS 错误码, sessionId: "" }
          │         │
          │         └─── 成功 ──→ 返回 { errorCode: 0, sessionId: "session_xxx" }
          │
-         └─── (异步) [onPhotoAvailable 回调]
+         └─── (异步) [ExpoCamera::onPhotoAvailable 回调]
+                   │
+                   ▼
+         [photoCapturedCallback_ (ExpoCamera 中注册的回调)]
+                   │
+                   ▼
+         [CaptureManager lambda: currentMode_ == SINGLE]
                    │
                    ▼
          [CaptureManager::onSinglePhotoCaptured()]
@@ -169,6 +248,9 @@ bool isCaptureActive() const {
                    └─── state = IDLE
 
 [异步错误] [ExpoCamera::onError]
+                   │
+                   ▼
+         [photoErrorCallback_ (ExpoCamera 中注册的回调)]
                    │
                    ▼
          [CaptureManager::onPhotoError]
@@ -198,22 +280,23 @@ bool isCaptureActive() const {
 
 ```
 ┌─────────────────┐     ┌─────────────────┐
-│   ExpoCamera    │────▶│ CaptureManager  │
-│  (相机控制)      │     │  (拍摄管理)      │
+│ CaptureManager  │────▶│   ExpoCamera    │
+│  (拍摄管理)      │     │  (相机控制)      │
 │                 │     │                 │
-│ 提供 PhotoOutput │     │ - 单次拍照      │
-│                 │     │ - 连拍协调      │
-└─────────────────┘     └────────┬────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-            │ImageProcessor│ │  TaskQueue   │ │  FileSaver   │
-            │ (图像处理)    │ │ (异步调度)   │ │ (纯IO)       │
-            │ - 解码       │ │              │ │ - 写文件     │
-            │ - 堆叠       │ │              │ │ - 路径管理   │
-            │ - 编码       │ │              │ │              │
-            └──────────────┘ └──────────────┘ └──────────────┘
+│ - 单次拍照      │     │ 提供 PhotoOutput │
+│ - 连拍协调      │     │                 │
+│ - 注册回调      │◀────│ 回调通知        │
+└────────┬────────┘     └─────────────────┘
+         │
+         │ 初始化
+         ▼
+┌─────────────────┐
+│   FileSaver     │
+│  (文件存储)      │
+└─────────────────┘
+
+依赖方向：CaptureManager → ExpoCamera, CaptureManager → FileSaver
+回调方向：ExpoCamera → CaptureManager (通过注册的回调)
 ```
 
 ### 4.3 数据流向
@@ -233,23 +316,29 @@ ExpoCamera   ExpoCamera   ImageProcessor    FileSaver
 拍照线程 (相机服务线程回调)
     │
     ▼
-onPhotoAvailable
+ExpoCamera::onPhotoAvailable
     │
-    ├─ 连拍模式 ──▶ CaptureManager::onBurstPhotoCaptured ──▶ TaskQueue::enqueue
-    │                                                          │
-    │                                                          ▼
-    │                                                    消费者线程
-    │                                                          │
-    │                                                          ▼
-    │                                                    ImageProcessor::processFrame
-    │                                                          │
-    │                                                          ▼
-    │                                                    napi_async_work
-    │                                                          │
-    │                                                          ▼
-    │                                                    UI 主线程 (JS 回调)
+    ▼
+photoCapturedCallback_ (通过回调机制)
     │
-    └─ 单拍模式 ──▶ CaptureManager::onSinglePhotoCaptured ──▶ napi_async_work ──▶ UI 主线程
+    ▼
+CaptureManager lambda (根据 currentMode_ 分发)
+    │
+    ├─ 单拍模式 ──▶ onSinglePhotoCaptured ──▶ napi_async_work ──▶ UI 主线程
+    │
+    └─ 连拍模式 ──▶ onBurstPhotoCaptured ──▶ TaskQueue::enqueue
+                                                      │
+                                                      ▼
+                                                消费者线程
+                                                      │
+                                                      ▼
+                                                ImageProcessor::processFrame
+                                                      │
+                                                      ▼
+                                                napi_async_work
+                                                      │
+                                                      ▼
+                                                UI 主线程 (JS 回调)
 ```
 
 ### 4.5 状态流转

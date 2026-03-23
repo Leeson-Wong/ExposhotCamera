@@ -99,18 +99,26 @@ std::string startBurst(const BurstConfig& config) {
 
 #### 4. 数据流向变化
 
-**之前**：
+**之前（直接依赖）**：
 ```
 takePhoto() → ExpoCamera::takePhoto()
-    → onPhotoAvailable() → 检查 isBurstActive()
-        → 分发到 BurstCapture 或 photoCallback_
+    → onPhotoAvailable() → 直接调用 CaptureManager::onSinglePhotoCaptured()
 ```
 
-**现在**：
+**现在（回调解耦）**：
 ```
 takePhoto() → CaptureManager::captureSingle()
-    → onPhotoAvailable() → CaptureManager::onSinglePhotoCaptured()
-        → singlePhotoCallback_
+    → OH_PhotoOutput_Capture()
+    → ExpoCamera::onPhotoAvailable()
+    → photoCapturedCallback_ (回调)
+    → CaptureManager lambda (根据 currentMode_ 分发)
+    → onSinglePhotoCaptured() / onBurstPhotoCaptured()
+```
+
+**依赖方向**：
+```
+CaptureManager → ExpoCamera (正确：上层依赖下层)
+ExpoCamera ⇥ CaptureManager (通过回调，无编译依赖)
 ```
 
 #### 5. 兼容性
@@ -122,6 +130,55 @@ takePhoto() → CaptureManager::captureSingle()
 ---
 
 ## Bug 修复记录
+
+### 2026-03-23：架构重构 - 依赖方向修正
+
+**问题描述**：
+- ExpoCamera 和 CaptureManager 存在互相依赖（循环依赖）
+- `expo_camera.cpp` include `capture_manager.h`
+- `capture_manager.cpp` include `expo_camera.h`
+
+**重构方案**：
+
+1. **依赖方向修正**：CaptureManager（上层）→ ExpoCamera（下层）
+
+2. **初始化流程统一**：
+   ```
+   initCamera() → CaptureManager::init()
+       ├→ ExpoCamera::init()
+       ├→ FileSaver::init()
+       └→ 注册回调到 ExpoCamera
+   ```
+
+3. **回调机制解耦**：
+   - ExpoCamera 不再直接调用 CaptureManager
+   - 改为通过注册的回调通知上层
+   - 新增 `PhotoCapturedCallback` 和 `PhotoErrorCallback` 类型
+
+**文件变更**：
+
+| 文件 | 变更 |
+|------|------|
+| `expo_camera.h` | 添加回调类型定义和注册接口 |
+| `expo_camera.cpp` | 移除 `#include "capture_manager.h"`，改用回调 |
+| `capture_manager.cpp` | init() 中初始化 ExpoCamera 和 FileSaver，注册回调 |
+| `napi_expo_camera.cpp` | InitCamera/ReleaseCamera 调用 CaptureManager |
+
+**架构图**：
+```
+NAPI Layer
+    │
+    ▼
+CaptureManager (业务层)
+    │
+    ├─→ ExpoCamera (硬件层)
+    │       │
+    │       └─→ 回调通知
+    │
+    └─→ FileSaver
+```
+
+---
 
 ### 2026-03-18：第二次拍照 IPC 崩溃修复
 
@@ -458,20 +515,36 @@ class CaptureManager {  // 单例
 };
 ```
 
-#### 4. ExpoCamera 集成
+#### 4. ExpoCamera 集成（通过回调解耦）
 
 ```cpp
-// 在 onPhotoAvailable 中，统一路由到 CaptureManager
-auto& captureManager = exposhot::CaptureManager::getInstance();
+// expo_camera.h - 定义回调类型
+using PhotoCapturedCallback = std::function<void(void* buffer, size_t size,
+                                                  uint32_t width, uint32_t height)>;
+using PhotoErrorCallback = std::function<void(int32_t errorCode)>;
 
-if (captureManager.isBurstActive()) {
-    // 连拍模式
-    captureManager.onBurstPhotoCaptured(
-        bufferCopy, nativeBufferSize, size.width, size.height);
-} else {
-    // 单拍模式
-    captureManager.onSinglePhotoCaptured(
-        bufferCopy, nativeBufferSize, size.width, size.height);
+// expo_camera.cpp - 通过回调通知上层，不直接依赖 CaptureManager
+void ExpoCamera::onPhotoAvailable(...) {
+    if (self.photoCapturedCallback_) {
+        self.photoCapturedCallback_(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
+    }
+}
+
+// capture_manager.cpp - 注册回调，根据模式分发
+bool CaptureManager::init() {
+    // 初始化下层
+    ExpoCamera::getInstance().init();
+    FileSaver::getInstance().init();
+
+    // 注册回调
+    ExpoCamera::getInstance().setPhotoCapturedCallback(
+        [this](void* buffer, size_t size, uint32_t width, uint32_t height) {
+            if (currentMode_ == CaptureMode::BURST) {
+                this->onBurstPhotoCaptured(buffer, size, width, height);
+            } else {
+                this->onSinglePhotoCaptured(buffer, size, width, height);
+            }
+        });
 }
 ```
 

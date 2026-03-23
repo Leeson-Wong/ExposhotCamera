@@ -1,5 +1,6 @@
 #include "capture_manager.h"
 #include "expo_camera.h"
+#include "file_saver.h"
 #include "ohcamera/photo_output.h"
 #include "hilog/log.h"
 
@@ -61,6 +62,9 @@ bool CaptureManager::init() {
         OH_LOG_ERROR(LOG_APP, "Failed to init ExpoCamera: %{public}d", err);
         return false;
     }
+
+    // 初始化 FileSaver
+    FileSaver::getInstance().init();
 
     // 注册照片回调到 ExpoCamera
     ExpoCamera::getInstance().setPhotoCapturedCallback(
