@@ -637,8 +637,9 @@ void CaptureManager::processTask(ImageTask&& task) {
             // 通知最终结果
             notifyImage(finalBuffer, finalSize, true);
 
-            state_.store(CaptureState::COMPLETED);
-            progress_.state = CaptureState::COMPLETED;
+            // 恢复空闲状态，允许再次拍摄
+            state_.store(CaptureState::IDLE);
+            progress_.state = CaptureState::IDLE;
             progress_.message = "Burst capture completed successfully";
 
             // 通知处理完成事件
@@ -646,8 +647,9 @@ void CaptureManager::processTask(ImageTask&& task) {
                               100, config_.frameCount, config_.frameCount, "Processing completed successfully"});
         } else {
             CM_LOG_ERROR("[PROCESS_TASK_FINALIZE_FAILED] Failed to finalize processing result");
-            state_.store(CaptureState::ERROR);
-            progress_.state = CaptureState::ERROR;
+            // 恢复空闲状态，允许再次拍摄
+            state_.store(CaptureState::IDLE);
+            progress_.state = CaptureState::IDLE;
             progress_.message = "Failed to finalize processing result";
 
             // 通知处理失败事件
