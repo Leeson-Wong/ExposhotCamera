@@ -7,6 +7,7 @@
 | 相机基础框架 | ✅ 完成 | 初始化、预览、释放 |
 | Surface 切换 | ✅ 完成 | 多场景切换预览流 |
 | 拍摄管理 | ✅ 完成 | 单拍/连拍统一管理，互斥保证 |
+| 模式切换 | ✅ 完成 | 单拍/连拍模式切换，PhotoOutput 重配置 |
 | 相机参数控制 | ✅ 完成 | 缩放、对焦 |
 | RenderSlot 注册 | ✅ 完成 | 观察者模式 |
 | 图像处理 | ✅ 完成 | 解码、堆叠、编码 |
@@ -577,6 +578,7 @@ bool CaptureManager::init() {
 | 首页 | `pages/Index.ets` | 功能入口 |
 | 基础相机 | `pages/TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
 | 连拍测试 | `pages/TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
+| 模式切换测试 | `pages/TestCaptureMode.ets` | 单拍/连拍模式切换，PhotoOutput 重配置 |
 | 完整功能 | `pages/TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
 | 对焦点测试 | `pages/TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
 
@@ -595,6 +597,14 @@ bool CaptureManager::init() {
 | `switchSurface(surfaceId)` | 切换预览 Surface |
 | `takePhoto()` | 单次拍照 |
 | `isPhotoOutputReady()` | 检查拍照就绪 |
+
+### 拍摄模式
+
+| 接口 | 说明 |
+|------|------|
+| `switchCaptureMode(mode)` | 切换拍摄模式（SINGLE/BURST） |
+| `getCaptureMode()` | 获取当前拍摄模式 |
+| `canSwitchMode()` | 检查是否可以切换模式 |
 
 ### 相机参数
 
@@ -646,6 +656,48 @@ bool CaptureManager::init() {
 |------|------|
 | `saveImageToFile(buffer, filename?)` | 保存图像到文件 |
 | `getImageSaveDir()` | 获取保存目录 |
+
+---
+
+## 2026-03-23：拍摄模式切换功能
+
+### 新增功能
+
+实现 `switchCaptureMode` 功能，支持在单拍模式和连拍模式之间切换：
+
+- **单拍模式 (SINGLE)**：选择最高分辨率，适合高质量单张拍照
+- **连拍模式 (BURST)**：选择接近 1080p 的中等分辨率，平衡性能
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `pages/TestCaptureMode.ets` | 模式切换测试页面 |
+
+### 新增 API
+
+| 接口 | 说明 |
+|------|------|
+| `switchCaptureMode(mode)` | 切换拍摄模式 |
+| `getCaptureMode()` | 获取当前模式 |
+| `canSwitchMode()` | 检查是否可切换 |
+
+### 技术实现
+
+模式切换流程：
+1. 停止 Session
+2. 移除旧 PhotoOutput
+3. 释放旧 PhotoOutput
+4. 根据模式选择合适的 photoProfile（单拍选最高分辨率，连拍选 1080p）
+5. 创建新 PhotoOutput
+6. 注册回调
+7. 添加到 Session
+8. 提交配置并启动
+
+### 连拍默认参数
+
+- 帧数：5 张
+- 曝光时间：2 秒
 
 ---
 

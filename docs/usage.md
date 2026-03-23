@@ -136,6 +136,14 @@ your-app/
 | `subscribeState(callback)` | 订阅相机状态 | `0` 成功 |
 | `unsubscribeState()` | 取消订阅 | `0` 成功 |
 
+### 拍摄模式
+
+| 接口 | 说明 | 返回值 |
+|------|------|--------|
+| `switchCaptureMode(mode)` | 切换拍摄模式 | `0` 成功 |
+| `getCaptureMode()` | 获取当前模式 | `CaptureMode` |
+| `canSwitchMode()` | 检查是否可切换 | `boolean` |
+
 ---
 
 ## 拍照模式
@@ -261,6 +269,7 @@ SDK 提供了完整的测试页面，位于 `entry/src/main/ets/pages/`：
 | 首页 | `Index.ets` | 功能入口导航 |
 | 基础相机 | `TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
 | 连拍测试 | `TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
+| 模式切换测试 | `TestCaptureMode.ets` | 单拍/连拍模式切换、PhotoOutput 重配置 |
 | 完整功能 | `TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
 | 对焦点测试 | `TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
 
@@ -592,6 +601,7 @@ nativeCamera.subscribeState((state, message) => {
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| 2.3.0 | 2026-03-23 | 新增模式切换功能：`switchCaptureMode`、`getCaptureMode`、`canSwitchMode`；支持单拍/连拍模式切换，自动选择合适分辨率 |
 | 2.2.0 | 2026-03-18 | Bug 修复：修复第二次拍照 IPC 崩溃（线程安全问题）；修复观察者回调通知；新增对焦点测试页面 |
 | 2.1.0 | 2026-03-16 | 拍照错误处理：返回值改为 `{ errorCode, sessionId }`，添加 `registerPhotoErrorCallback` |
 | 2.0.0 | 2026-03-16 | 重构：统一拍摄动作到 CaptureManager，实现单拍/连拍互斥 |

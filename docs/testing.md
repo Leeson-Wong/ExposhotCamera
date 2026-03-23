@@ -300,6 +300,7 @@ export default function napiInterfaceTest() {
 |---------|------|----------|
 | TestBasicCamera | `TestBasicCamera.ets` | 基础预览、拍照 |
 | TestBurstCapture | `TestBurstCapture.ets` | 连拍、堆叠 |
+| TestCaptureMode | `TestCaptureMode.ets` | 模式切换、PhotoOutput 重配置 |
 | TestStackSimulate | `TestStackSimulate.ets` | 堆叠模拟、rawfile 读取 |
 | TestFocusPoint | `TestFocusPoint.ets` | 对焦功能 |
 | TestFocusMagnifier | `TestFocusMagnifier.ets` | 对焦放大镜 |
