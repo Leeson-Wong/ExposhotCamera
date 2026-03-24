@@ -59,7 +59,7 @@
 static ExpoCamera& getInstance();
 
 // 生命周期
-bool init();
+bool init(CaptureMode mode);  // mode: SINGLE 或 BURST
 void release();
 
 // 预览控制
@@ -72,6 +72,11 @@ bool setZoomRatio(float ratio);
 bool setFocusMode(FocusMode mode);
 bool setFocusPoint(float x, float y);
 
+// 模式切换
+Camera_ErrorCode switchCaptureMode(CaptureMode mode);
+CaptureMode getCaptureMode() const;
+bool canSwitchMode() const;
+
 // 观察者管理
 std::string registerObserver(const std::string& surfaceId, BindPreviewObserverCallback bindCallback);
 bool unregisterObserver(const std::string& slotId);
@@ -83,6 +88,10 @@ void unsubscribeState();
 
 // 提供 PhotoOutput（供 CaptureManager 使用）
 Camera_PhotoOutput* getPhotoOutput() const;
+
+// 回调注册（供 CaptureManager 注册）
+void setPhotoCapturedCallback(PhotoCapturedCallback callback);
+void setPhotoErrorCallback(PhotoErrorCallback callback);
 ```
 
 ### 协作关系
@@ -150,7 +159,7 @@ Camera_PhotoOutput* getPhotoOutput() const;
 static CaptureManager& getInstance();
 
 // 生命周期
-bool init();
+bool init(CaptureMode mode);  // mode: SINGLE 或 BURST
 void release();
 
 // 回调设置
@@ -167,6 +176,11 @@ void onSinglePhotoCaptured(void* buffer, size_t size, int32_t width, int32_t hei
 int32_t startBurst(const BurstConfig& config, std::string& outSessionId);
 void cancelBurst();
 void onBurstPhotoCaptured(void* buffer, size_t size, int32_t width, int32_t height);
+
+// 模式切换
+int32_t switchCaptureMode(CaptureMode mode);
+CaptureMode getCaptureMode() const;
+bool canSwitchMode() const;
 
 // 状态查询
 bool isCaptureActive() const;  // 包含单拍和连拍
@@ -405,6 +419,30 @@ std::string generateFileName(const std::string& prefix, int32_t index);
 
 ## 协作场景
 
+### 场景 0：初始化与模式选择
+
+```
+应用启动
+     │
+     ▼
+用户选择拍摄模式（SINGLE 或 BURST）
+     │
+     ▼
+NAPI: initCamera(mode, resourceManager?)
+     │
+     ▼
+CaptureManager::init(mode)
+     │
+     ├─→ ExpoCamera::init(mode)  // 根据 mode 选择分辨率
+     │         │
+     │         └─→ SINGLE: 选择最高分辨率
+     │             BURST:  选择 1080p 附近分辨率
+     │
+     ├─→ FileSaver::init()
+     │
+     └─→ 注册回调到 ExpoCamera
+```
+
 ### 场景 1：单次拍照
 
 ```
@@ -420,7 +458,10 @@ ExpoCamera: OH_PhotoOutput_Capture()
 ExpoCamera: onPhotoAvailable
      │
      ▼
-CaptureManager: onSinglePhotoCaptured
+photoCapturedCallback_ (注册的回调)
+     │
+     ▼
+CaptureManager: currentMode_ == SINGLE → onSinglePhotoCaptured
      │
      ▼ (异步)
 NAPI 回调: 返回 ImageData 给 ArkTS
@@ -460,7 +501,36 @@ ExpoCamera: onPhotoAvailable    CaptureManager: 收集帧
                                 NAPI 回调: 返回结果
 ```
 
-### 场景 3：预览流切换
+### 场景 3：模式切换
+
+```
+用户调用 switchCaptureMode(SINGLE → BURST)
+     │
+     ▼
+CaptureManager::switchCaptureMode()
+     │
+     ├─→ 检查 canSwitchMode()（预览已启动且无拍摄进行中）
+     │         │
+     │         └─→ false → 返回错误码
+     │
+     ▼
+ExpoCamera::switchCaptureMode(BURST)
+     │
+     ├─→ Session.stop()
+     ├─→ Session.removeOutput(old PhotoOutput)
+     ├─→ old PhotoOutput.release()
+     ├─→ 选择 1080p 附近的 photoProfile
+     ├─→ 创建新 PhotoOutput
+     ├─→ 注册拍照回调
+     ├─→ Session.addOutput(new PhotoOutput)
+     ├─→ Session.commitConfig()
+     └─→ Session.start()
+     │
+     ▼
+CaptureManager: 更新 currentMode_ = BURST
+```
+
+### 场景 4：预览流切换
 
 ```
 页面 A 注册观察者
@@ -562,6 +632,8 @@ onPhotoAvailable()                         napi_async_work
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| 2.4.0 | 2026-03-24 | API 改进：`init()` 接收 `CaptureMode` 必填参数；新增模式切换功能 `switchCaptureMode()` |
+| 2.3.0 | 2026-03-23 | 新增：`ExpoCamera::switchCaptureMode()` 支持运行时切换单拍/连拍模式 |
 | 2.2.0 | 2026-03-18 | 更新：BurstCapture 替换为 CaptureManager（统一单拍和连拍）；添加线程安全设计说明 |
 | 2.0.0 | 2026-03-16 | 重构：统一拍摄动作到 CaptureManager，实现单拍/连拍互斥 |
 | 1.0.0 | - | 初始版本 |
