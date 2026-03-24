@@ -579,8 +579,81 @@ bool CaptureManager::init() {
 | 基础相机 | `pages/TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
 | 连拍测试 | `pages/TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
 | 模式切换测试 | `pages/TestCaptureMode.ets` | 单拍/连拍模式切换，PhotoOutput 重配置 |
-| 完整功能 | `pages/TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
+| Slot 切换测试 | `pages/TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
 | 对焦点测试 | `pages/TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
+| 对焦放大镜 | `pages/TestFocusMagnifier.ets` | 点击对焦时显示放大镜、精确对焦 |
+| 堆叠模拟 | `pages/TestStackSimulate.ets` | 堆叠流程模拟、rawfile 读取 |
+
+---
+
+## 2026-03-24：API 改进与安全区适配
+
+### API 改进
+
+**`initCamera` 参数调整**：
+
+```typescript
+// 旧版（mode 可选）
+initCamera(resourceManager?: object, mode?: CaptureMode): number;
+
+// 新版（mode 必填）
+initCamera(mode: CaptureMode, resourceManager?: object): number;
+```
+
+**原因**：
+- 可选参数必须在必选参数后面
+- 拍摄模式是核心配置，应该在初始化时明确指定
+
+**迁移示例**：
+```typescript
+// 旧版
+nativeCamera.initCamera();  // 默认 SINGLE
+nativeCamera.initCamera(resMgr, nativeCamera.CaptureMode.BURST);
+
+// 新版
+nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
+nativeCamera.initCamera(nativeCamera.CaptureMode.BURST, resMgr);
+```
+
+### 安全区适配
+
+所有测试页面统一添加上下安全区：
+
+```typescript
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
+
+@Entry
+@Component
+struct TestPage {
+  @StorageProp(SAFE_AREA_TOP) safeTop: number = 0;
+  @StorageProp(SAFE_AREA_BOTTOM) safeBottom: number = 0;
+
+  build() {
+    Column() {
+      // 顶部状态栏
+      Row() { ... }
+        .padding({ top: this.safeTop + 8, left: 12, right: 12, bottom: 8 })
+
+      // 底部控制区
+      Row() { ... }
+        .padding({ left: 16, right: 16, top: 8, bottom: this.safeBottom + 16 })
+    }
+  }
+}
+```
+
+### 新增测试页面
+
+**TestFocusMagnifier.ets**：对焦放大镜测试
+
+- 点击屏幕时显示放大镜
+- 放大镜实时跟随预览内容更新
+- 支持拖动更新对焦点
+- 自动隐藏机制（2秒后消失）
+
+### 页面命名调整
+
+- `TestFullFeatures.ets` 入口标题改为 "Slot 切换测试"，更准确反映功能
 
 ---
 

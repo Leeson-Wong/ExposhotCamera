@@ -298,12 +298,13 @@ export default function napiInterfaceTest() {
 
 | 测试页面 | 文件 | 测试重点 |
 |---------|------|----------|
-| TestBasicCamera | `TestBasicCamera.ets` | 基础预览、拍照 |
-| TestBurstCapture | `TestBurstCapture.ets` | 连拍、堆叠 |
-| TestCaptureMode | `TestCaptureMode.ets` | 模式切换、PhotoOutput 重配置 |
-| TestStackSimulate | `TestStackSimulate.ets` | 堆叠模拟、rawfile 读取 |
-| TestFocusPoint | `TestFocusPoint.ets` | 对焦功能 |
-| TestFocusMagnifier | `TestFocusMagnifier.ets` | 对焦放大镜 |
+| TestBasicCamera | `TestBasicCamera.ets` | 基础预览、拍照、缩放、对焦 |
+| TestBurstCapture | `TestBurstCapture.ets` | 连拍、堆叠、进度追踪、延迟拍摄 |
+| TestCaptureMode | `TestCaptureMode.ets` | 模式切换、PhotoOutput 重配置、单拍/连拍切换 |
+| TestFullFeatures | `TestFullFeatures.ets` | Slot 切换、双预览、完整相机控制 |
+| TestFocusPoint | `TestFocusPoint.ets` | 对焦功能、对焦轨迹、预设位置 |
+| TestFocusMagnifier | `TestFocusMagnifier.ets` | 对焦放大镜、触摸对焦、实时预览 |
+| TestStackSimulate | `TestStackSimulate.ets` | 堆叠模拟、rawfile 读取、进度显示 |
 
 ### 3.2 自动化 UI 测试
 
@@ -438,9 +439,25 @@ genhtml coverage.info --output-directory coverage_report
 | 文档状态 | 📋 规划中 |
 | 实现状态 | ❌ 未开始 |
 | 验证状态 | ❌ 未验证 |
-| 最后更新 | 2026-03-21 |
+| 最后更新 | 2026-03-24 |
 
 **备注**：本文档中的所有 CMake 配置、测试代码、目录结构均为规划方案，尚未在实际项目中验证。在实施前需要：
 1. 确认 HarmonyOS SDK 版本对应的 GTest/Hypium 支持情况
 2. 验证 CMake 配置是否与项目构建系统兼容
 3. 实际测试目录结构和代码示例的正确性
+
+---
+
+## 9. 测试页面汇总
+
+> 以下测试页面均已实现，可用于手动测试各功能模块
+
+| 页面 | 初始化模式 | 主要功能 |
+|------|------------|----------|
+| TestBasicCamera | `CaptureMode.SINGLE` | 预览、拍照、缩放、对焦 |
+| TestBurstCapture | `CaptureMode.BURST` | 连拍堆叠、进度追踪、延迟拍摄 |
+| TestCaptureMode | 动态切换 | 模式切换、单拍/连拍测试 |
+| TestFullFeatures | `CaptureMode.SINGLE` | Slot 切换、双预览、完整控制 |
+| TestFocusPoint | `CaptureMode.SINGLE` | 对焦功能、对焦轨迹 |
+| TestFocusMagnifier | `CaptureMode.SINGLE` | 对焦放大镜、触摸对焦 |
+| TestStackSimulate | `CaptureMode.SINGLE` | 堆叠模拟、rawfile 读取 |

@@ -98,7 +98,7 @@ your-app/
 
 | 接口 | 说明 | 返回值 |
 |------|------|--------|
-| `initCamera()` | 初始化相机 | `0` 成功 |
+| `initCamera(mode, resourceManager?)` | 初始化相机（mode 必填） | `0` 成功 |
 | `releaseCamera()` | 释放相机 | `0` 成功 |
 | `startPreview(surfaceId)` | 启动预览 | `0` 成功 |
 | `stopPreview()` | 停止预览 | `0` 成功 |
@@ -270,8 +270,9 @@ SDK 提供了完整的测试页面，位于 `entry/src/main/ets/pages/`：
 | 基础相机 | `TestBasicCamera.ets` | 预览、拍照、缩放、对焦测试 |
 | 连拍测试 | `TestBurstCapture.ets` | 连拍堆叠、进度追踪、缩略图预览 |
 | 模式切换测试 | `TestCaptureMode.ets` | 单拍/连拍模式切换、PhotoOutput 重配置 |
-| 完整功能 | `TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
+| Slot 切换测试 | `TestFullFeatures.ets` | 双预览、Slot 切换、完整相机控制 |
 | 对焦点测试 | `TestFocusPoint.ets` | 手动对焦点设置、对焦轨迹、预设位置 |
+| 对焦放大镜 | `TestFocusMagnifier.ets` | 点击对焦时显示放大镜、精确对焦 |
 
 ### 对焦点测试页面
 
@@ -319,6 +320,11 @@ struct PhotoPage {
   private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear() {
+    // 初始化相机（mode 参数必填）
+    // SINGLE = 单拍模式（高分辨率）
+    // BURST = 连拍模式（中等分辨率）
+    nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
+
     // 注册图像数据回调
     nativeCamera.registerImageDataCallback((data) => {
       console.log(`拍照成功: ${data.width}x${data.height}`);
@@ -344,7 +350,7 @@ struct PhotoPage {
         controller: this.xComponentController
       })
       .onLoad(() => {
-        nativeCamera.initCamera();
+        nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
         const surfaceId = this.xComponentController.getXComponentSurfaceId();
         nativeCamera.startPreview(surfaceId);
       })
@@ -601,6 +607,7 @@ nativeCamera.subscribeState((state, message) => {
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| 2.4.0 | 2026-03-24 | API 改进：`initCamera(mode, resourceManager?)` mode 参数改为必填；新增对焦放大镜测试页面；测试页面统一安全区适配 |
 | 2.3.0 | 2026-03-23 | 新增模式切换功能：`switchCaptureMode`、`getCaptureMode`、`canSwitchMode`；支持单拍/连拍模式切换，自动选择合适分辨率 |
 | 2.2.0 | 2026-03-18 | Bug 修复：修复第二次拍照 IPC 崩溃（线程安全问题）；修复观察者回调通知；新增对焦点测试页面 |
 | 2.1.0 | 2026-03-16 | 拍照错误处理：返回值改为 `{ errorCode, sessionId }`，添加 `registerPhotoErrorCallback` |

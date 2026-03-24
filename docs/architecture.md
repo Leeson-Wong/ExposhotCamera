@@ -61,12 +61,12 @@
 ### 0.2 初始化流程
 
 ```
-initCamera() [NAPI]
+initCamera(mode, resourceManager?) [NAPI]
       │
       ▼
-CaptureManager::init()
+CaptureManager::init(mode)
       │
-      ├─→ ExpoCamera::init()           // 初始化相机硬件
+      ├─→ ExpoCamera::init(mode)       // 初始化相机硬件（传入模式）
       │
       ├─→ FileSaver::init()            // 初始化文件存储
       │
@@ -76,6 +76,12 @@ CaptureManager::init()
       │
       └─→ TaskQueue::start()           // 启动处理队列
 ```
+
+**参数说明**：
+- `mode: CaptureMode` - **必填**，拍摄模式
+  - `CaptureMode.SINGLE` - 单拍模式（高分辨率）
+  - `CaptureMode.BURST` - 连拍模式（中等分辨率）
+- `resourceManager?: object` - 可选，用于访问 rawfile
 
 ### 0.3 数据回调流程
 
@@ -612,6 +618,19 @@ cpp/
 └── types/
     └── libexpocamera/
         └── Index.d.ts           # 类型定义
+
+ets/
+├── pages/
+│   ├── Index.ets                # 首页入口
+│   ├── TestBasicCamera.ets      # 基础相机测试
+│   ├── TestBurstCapture.ets     # 连拍堆叠测试
+│   ├── TestCaptureMode.ets      # 模式切换测试
+│   ├── TestFullFeatures.ets     # Slot 切换测试
+│   ├── TestFocusPoint.ets       # 对焦点测试
+│   ├── TestFocusMagnifier.ets   # 对焦放大镜测试
+│   └── TestStackSimulate.ets    # 堆叠模拟测试
+└── util/
+    └── WindowManager.ets        # 窗口管理、安全区
 ```
 
 ---
