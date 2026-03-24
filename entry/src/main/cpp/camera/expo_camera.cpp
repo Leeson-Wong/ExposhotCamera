@@ -193,6 +193,8 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
     err = OH_CaptureSession_BeginConfig(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to begin config: %{public}d", err);
+        // BeginConfig 失败，尝试恢复
+        OH_CaptureSession_Start(captureSession_);
         return err;
     }
 
@@ -236,6 +238,10 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
         OH_LOG_ERROR(LOG_APP, "Failed to add preview output: %{public}d", err);
         OH_PreviewOutput_Release(previewOutput_);
         previewOutput_ = nullptr;
+        // Session 配置不完整，标记为损坏
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
@@ -254,14 +260,22 @@ Camera_ErrorCode ExpoCamera::switchSurfaceInternal(const std::string& surfaceId)
     // 7. 提交配置
     err = OH_CaptureSession_CommitConfig(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to commit config: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "Failed to commit config: %{public}d, session corrupted", err);
+        // CommitConfig 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
     // 7. 启动 Session
     err = OH_CaptureSession_Start(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to start session: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "Failed to start session: %{public}d, session corrupted", err);
+        // Start 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
@@ -317,6 +331,7 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     err = OH_CaptureSession_BeginConfig(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to begin session config: %{public}d", err);
+        initialized_ = false;
         return err;
     }
 
@@ -324,12 +339,14 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     err = OH_CaptureSession_AddInput(captureSession_, cameraInput_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Failed to add input: %{public}d", err);
+        initialized_ = false;
         return err;
     }
 
     // 创建 PreviewOutput
     err = createPreviewOutput(surfaceId);
     if (err != CAMERA_OK) {
+        initialized_ = false;
         return err;
     }
 
@@ -339,6 +356,7 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
         OH_LOG_ERROR(LOG_APP, "Failed to add preview output: %{public}d", err);
         OH_PreviewOutput_Release(previewOutput_);
         previewOutput_ = nullptr;
+        initialized_ = false;
         return err;
     }
 
@@ -365,14 +383,20 @@ Camera_ErrorCode ExpoCamera::startPreviewInternal(const std::string& surfaceId) 
     // 提交配置
     err = OH_CaptureSession_CommitConfig(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to commit session config: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "Failed to commit session config: %{public}d, session corrupted", err);
+        // CommitConfig 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
     // 启动 Session（Session 启动后预览流自动开始）
     err = OH_CaptureSession_Start(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to start session: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "Failed to start session: %{public}d, session corrupted", err);
+        // Start 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
@@ -1191,9 +1215,6 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
     OH_LOG_INFO(LOG_APP, "Switching capture mode: %{public}d -> %{public}d",
                 static_cast<int>(currentMode_), static_cast<int>(mode));
 
-    // 保存旧模式用于错误恢复
-    CaptureMode oldMode = currentMode_;
-
     Camera_ErrorCode err;
 
     // 1. 停止 Session
@@ -1235,8 +1256,14 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
     // 6. 创建新的 PhotoOutput（会根据 currentMode_ 选择合适的 profile）
     err = createPhotoOutput();
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "createPhotoOutput failed: %{public}d", err);
-        currentMode_ = oldMode;  // 恢复旧模式
+        OH_LOG_ERROR(LOG_APP, "createPhotoOutput failed: %{public}d, attempting rollback", err);
+        // 尝试回滚：用旧模式重建 PhotoOutput
+        currentMode_ = (mode == CaptureMode::SINGLE) ? CaptureMode::BURST : CaptureMode::SINGLE;
+        Camera_ErrorCode rollbackErr = createPhotoOutput();
+        if (rollbackErr == CAMERA_OK && photoOutput_) {
+            OH_CaptureSession_AddPhotoOutput(captureSession_, photoOutput_);
+            photoOutputAdded_ = true;
+        }
         OH_CaptureSession_CommitConfig(captureSession_);
         OH_CaptureSession_Start(captureSession_);
         return err;
@@ -1248,9 +1275,10 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
         OH_LOG_ERROR(LOG_APP, "AddPhotoOutput failed: %{public}d", err);
         OH_PhotoOutput_Release(photoOutput_);
         photoOutput_ = nullptr;
-        currentMode_ = oldMode;  // 恢复旧模式
-        OH_CaptureSession_CommitConfig(captureSession_);
-        OH_CaptureSession_Start(captureSession_);
+        // Session 配置不完整，标记为损坏
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
     photoOutputAdded_ = true;
@@ -1258,16 +1286,22 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
     // 8. 提交配置
     err = OH_CaptureSession_CommitConfig(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "CommitConfig failed: %{public}d", err);
-        currentMode_ = oldMode;  // 恢复旧模式
+        OH_LOG_ERROR(LOG_APP, "CommitConfig failed: %{public}d, session corrupted", err);
+        // CommitConfig 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 
     // 9. 启动 Session
     err = OH_CaptureSession_Start(captureSession_);
     if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Start session failed: %{public}d", err);
-        currentMode_ = oldMode;  // 恢复旧模式
+        OH_LOG_ERROR(LOG_APP, "Start session failed: %{public}d, session corrupted", err);
+        // Start 失败后 Session 状态未知，标记为需要重新初始化
+        initialized_ = false;
+        previewing_ = false;
+        OH_LOG_ERROR(LOG_APP, "Session corrupted, need re-initialization");
         return err;
     }
 

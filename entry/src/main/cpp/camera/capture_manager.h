@@ -190,7 +190,8 @@ private:
     CaptureManager& operator=(const CaptureManager&) = delete;
 
     // 内部方法
-    void notifyProgress();
+    void notifyProgress();      // 不加锁版本，调用者需确保已持有锁或 progress_ 已安全
+    void notifyProgressSafe();  // 线程安全版本，内部加锁
     void notifyImage(void* buffer, size_t size, bool isFinal);
     void processTask(ImageTask&& task);
     void startCaptureLoop();

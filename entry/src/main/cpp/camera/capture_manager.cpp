@@ -424,9 +424,12 @@ void CaptureManager::cancelBurst() {
 
     CM_LOG_INFO("[CANCEL_BURST] State changed to CANCELLED from %{public}d", static_cast<int>(expected));
 
-    progress_.state = CaptureState::CANCELLED;
-    progress_.message = "Burst cancelled";
-    notifyProgress();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        progress_.state = CaptureState::CANCELLED;
+        progress_.message = "Burst cancelled";
+    }
+    notifyProgressSafe();
 
     // 清空队列
     taskQueue_->clear();
@@ -605,9 +608,12 @@ void CaptureManager::processTask(ImageTask&& task) {
         if (!processor_->initStacking(config_.frameCount, imageWidth_, imageHeight_)) {
             CM_LOG_ERROR("[PROCESS_TASK_INIT_FAILED] Failed to init processing session");
             state_.store(CaptureState::ERROR);
-            progress_.state = CaptureState::ERROR;
-            progress_.message = "Failed to initialize processing session";
-            notifyProgress();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                progress_.state = CaptureState::ERROR;
+                progress_.message = "Failed to initialize processing session";
+            }
+            notifyProgressSafe();
 
             // 通知处理失败事件
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_FAILED, currentSessionId_,
@@ -626,8 +632,13 @@ void CaptureManager::processTask(ImageTask&& task) {
     }
 
     int32_t processed = processCount_.fetch_add(1) + 1;
-    progress_.processedFrames = processed;
-    notifyProgress();
+
+    // 更新进度（加锁保护）并通知
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        progress_.processedFrames = processed;
+    }
+    notifyProgressSafe();
 
     // 计算进度百分比
     int32_t progressPercent = (processed * 100) / config_.frameCount;
@@ -645,6 +656,8 @@ void CaptureManager::processTask(ImageTask&& task) {
         size_t resultSize = 0;
         if (processor_->getCurrentResult(&resultBuffer, &resultSize)) {
             notifyImage(resultBuffer, resultSize, false);
+        } else {
+            CM_LOG_WARN("[PROCESS_TASK_PREVIEW_FAILED] Failed to get current result for frame %{public}d", task.taskId);
         }
     }
 
@@ -664,8 +677,11 @@ void CaptureManager::processTask(ImageTask&& task) {
 
             // 恢复空闲状态，允许再次拍摄
             state_.store(CaptureState::IDLE);
-            progress_.state = CaptureState::IDLE;
-            progress_.message = "Burst capture completed successfully";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                progress_.state = CaptureState::IDLE;
+                progress_.message = "Burst capture completed successfully";
+            }
 
             // 通知处理完成事件
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_END, currentSessionId_,
@@ -674,20 +690,38 @@ void CaptureManager::processTask(ImageTask&& task) {
             CM_LOG_ERROR("[PROCESS_TASK_FINALIZE_FAILED] Failed to finalize processing result");
             // 恢复空闲状态，允许再次拍摄
             state_.store(CaptureState::IDLE);
-            progress_.state = CaptureState::IDLE;
-            progress_.message = "Failed to finalize processing result";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                progress_.state = CaptureState::IDLE;
+                progress_.message = "Failed to finalize processing result";
+            }
 
             // 通知处理失败事件
             notifyProcessEvent(processEventCallback_, {ProcessEventType::PROCESS_FAILED, currentSessionId_,
                               progressPercent, processed, config_.frameCount, "Failed to finalize processing result"});
         }
-        notifyProgress();
+        notifyProgressSafe();
     }
 }
 
 void CaptureManager::notifyProgress() {
+    // 调用者负责确保 progress_ 的一致性
+    // 大多数调用者已在锁内修改 progress_，直接使用即可
+    // processTask 中需要先在锁内更新，再调用此方法
     if (progressCallback_) {
         progressCallback_(progress_);
+    }
+}
+
+void CaptureManager::notifyProgressSafe() {
+    // 线程安全版本：加锁复制后回调
+    BurstProgress progressCopy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        progressCopy = progress_;
+    }
+    if (progressCallback_) {
+        progressCallback_(progressCopy);
     }
 }
 

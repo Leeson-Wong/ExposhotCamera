@@ -1446,6 +1446,13 @@ typedef struct {
 } Rgb16Result;
 // 连拍进度回调 (内部使用)
 static void onBurstProgressCallback(const exposhot::BurstProgress& progress) {
+    OH_LOG_INFO(LOG_APP, "[BURST_PROGRESS] sessionId=%{public}s, state=%{public}d, captured=%{public}d/%{public}d, processed=%{public}d/%{public}d, msg=%{public}s",
+                progress.sessionId.c_str(),
+                static_cast<int>(progress.state),
+                progress.capturedFrames, progress.totalFrames,
+                progress.processedFrames, progress.totalFrames,
+                progress.message.c_str());
+
     // 在锁保护下获取回调引用
     napi_env callbackEnv = nullptr;
     napi_ref callbackRef = nullptr;
