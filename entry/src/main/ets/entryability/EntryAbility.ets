@@ -6,6 +6,12 @@ import PermissionManager from '../util/PermissionManager';
 import CameraConstant from '../util/Constants';
 import { windowManager } from '../util/WindowManager';
 
+// ============ 测试模式开关 ============
+// true: 进入测试页面列表
+// false: 显示正式版首页
+const ENABLE_TEST_PAGES = true;
+// =====================================
+
 const DOMAIN = 0x0000;
 const CAMERA_PERMISSION: Permissions = 'ohos.permission.CAMERA';
 
@@ -40,7 +46,11 @@ export default class EntryAbility extends UIAbility {
     // Set immersive mode and safe area
     windowManager.bindWindowClass(windowStage);
 
-    windowStage.loadContent('pages/Index', (err) => {
+    // 根据编译时常量决定加载哪个首页
+    const startPage = ENABLE_TEST_PAGES ? 'pages/IndexTest' : 'pages/Index';
+    hilog.info(DOMAIN, 'testTag', 'Loading page: %{public}s, ENABLE_TEST_PAGES=%{public}s', startPage, String(ENABLE_TEST_PAGES));
+
+    windowStage.loadContent(startPage, (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;

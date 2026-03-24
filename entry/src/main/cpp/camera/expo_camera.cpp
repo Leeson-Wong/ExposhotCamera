@@ -1004,9 +1004,17 @@ Camera_ErrorCode ExpoCamera::createPhotoOutput() {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-    Camera_Profile* photoProfile = outputCapability->photoProfiles[0];
-    OH_LOG_INFO(LOG_APP, "Photo profile: %{public}ux%{public}u, format=%{public}d",
-                photoProfile->size.width, photoProfile->size.height, photoProfile->format);
+    // 根据当前模式选择合适的 profile
+    int32_t profileIndex = selectPhotoProfileForMode(currentMode_);
+    // 确保索引有效
+    if (profileIndex < 0 || profileIndex >= static_cast<int32_t>(outputCapability->photoProfilesSize)) {
+        profileIndex = 0;
+    }
+
+    Camera_Profile* photoProfile = outputCapability->photoProfiles[profileIndex];
+    OH_LOG_INFO(LOG_APP, "Photo profile[%{public}d]: %{public}ux%{public}u, format=%{public}d, mode=%{public}d",
+                profileIndex, photoProfile->size.width, photoProfile->size.height,
+                photoProfile->format, static_cast<int>(currentMode_));
 
     // 创建 PhotoOutput
     err = OH_CameraManager_CreatePhotoOutputWithoutSurface(cameraManager_, photoProfile, &photoOutput_);
@@ -1183,6 +1191,9 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
     OH_LOG_INFO(LOG_APP, "Switching capture mode: %{public}d -> %{public}d",
                 static_cast<int>(currentMode_), static_cast<int>(mode));
 
+    // 保存旧模式用于错误恢复
+    CaptureMode oldMode = currentMode_;
+
     Camera_ErrorCode err;
 
     // 1. 停止 Session
@@ -1218,84 +1229,48 @@ Camera_ErrorCode ExpoCamera::switchCaptureMode(CaptureMode mode) {
         photoOutput_ = nullptr;
     }
 
-    // 5. 选择新模式对应的 photoProfile
-    int32_t profileIndex = selectPhotoProfileForMode(mode);
+    // 5. 先更新模式，让 createPhotoOutput 使用正确的 profile
+    currentMode_ = mode;
 
-    // 6. 获取输出能力
-    Camera_OutputCapability* outputCapability = nullptr;
-    err = OH_CameraManager_GetSupportedCameraOutputCapabilityWithSceneMode(
-        cameraManager_, &cameras_[currentCameraIndex_],
-        Camera_SceneMode::NORMAL_PHOTO, &outputCapability);
+    // 6. 创建新的 PhotoOutput（会根据 currentMode_ 选择合适的 profile）
+    err = createPhotoOutput();
     if (err != CAMERA_OK) {
-        OH_LOG_WARN(LOG_APP, "GetCapabilityWithSceneMode failed: %{public}d, fallback", err);
-        err = OH_CameraManager_GetSupportedCameraOutputCapability(
-            cameraManager_, &cameras_[currentCameraIndex_], &outputCapability);
-        if (err != CAMERA_OK) {
-            OH_LOG_ERROR(LOG_APP, "GetCapability failed: %{public}d", err);
-            OH_CaptureSession_CommitConfig(captureSession_);
-            OH_CaptureSession_Start(captureSession_);
-            return err;
-        }
-    }
-
-    if (outputCapability->photoProfilesSize == 0) {
-        OH_LOG_ERROR(LOG_APP, "No photo profiles");
-        OH_CaptureSession_CommitConfig(captureSession_);
-        OH_CaptureSession_Start(captureSession_);
-        return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
-    }
-
-    // 确保索引有效
-    if (profileIndex < 0 || profileIndex >= static_cast<int32_t>(outputCapability->photoProfilesSize)) {
-        profileIndex = 0;
-    }
-
-    Camera_Profile* photoProfile = outputCapability->photoProfiles[profileIndex];
-    OH_LOG_INFO(LOG_APP, "Selected profile: %{public}ux%{public}u",
-                photoProfile->size.width, photoProfile->size.height);
-
-    // 7. 创建新的 PhotoOutput
-    err = OH_CameraManager_CreatePhotoOutputWithoutSurface(cameraManager_, photoProfile, &photoOutput_);
-    if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "CreatePhotoOutput failed: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "createPhotoOutput failed: %{public}d", err);
+        currentMode_ = oldMode;  // 恢复旧模式
         OH_CaptureSession_CommitConfig(captureSession_);
         OH_CaptureSession_Start(captureSession_);
         return err;
     }
 
-    // 8. 注册回调
-    err = OH_PhotoOutput_RegisterPhotoAvailableCallback(photoOutput_, ExpoCamera::onPhotoAvailable);
-    if (err != CAMERA_OK) {
-        OH_LOG_WARN(LOG_APP, "RegisterCallback failed: %{public}d", err);
-    }
-
-    // 9. 添加到 Session
+    // 7. 添加到 Session
     err = OH_CaptureSession_AddPhotoOutput(captureSession_, photoOutput_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "AddPhotoOutput failed: %{public}d", err);
         OH_PhotoOutput_Release(photoOutput_);
         photoOutput_ = nullptr;
+        currentMode_ = oldMode;  // 恢复旧模式
         OH_CaptureSession_CommitConfig(captureSession_);
         OH_CaptureSession_Start(captureSession_);
         return err;
     }
     photoOutputAdded_ = true;
 
-    // 10. 提交配置
+    // 8. 提交配置
     err = OH_CaptureSession_CommitConfig(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "CommitConfig failed: %{public}d", err);
+        currentMode_ = oldMode;  // 恢复旧模式
         return err;
     }
 
-    // 11. 启动 Session
+    // 9. 启动 Session
     err = OH_CaptureSession_Start(captureSession_);
     if (err != CAMERA_OK) {
         OH_LOG_ERROR(LOG_APP, "Start session failed: %{public}d", err);
+        currentMode_ = oldMode;  // 恢复旧模式
         return err;
     }
 
-    currentMode_ = mode;
     OH_LOG_INFO(LOG_APP, "Capture mode switched to %{public}d", static_cast<int>(mode));
 
     return CAMERA_OK;
@@ -1318,7 +1293,7 @@ int32_t ExpoCamera::selectPhotoProfileForMode(CaptureMode mode) {
     OH_LOG_INFO(LOG_APP, "Photo profiles (%{public}u):", outputCapability->photoProfilesSize);
     for (uint32_t i = 0; i < outputCapability->photoProfilesSize; i++) {
         Camera_Profile* p = outputCapability->photoProfiles[i];
-        OH_LOG_INFO(LOG_APP, "  [%{public}u] %{public}ux%{public}u", i, p->size.width, p->size.height);
+        OH_LOG_INFO(LOG_APP, "  [%{public}u] %{public}ux%{public}u, format=%{public}d", i, p->size.width, p->size.height, p->format);
     }
 
     int32_t selectedIndex = 0;
@@ -1405,9 +1380,3 @@ int32_t ExpoCamera::selectCameraForMode(CaptureMode mode) {
 
     return -1;
 }
-
-//void ExpoCamera::notifyState(const std::string& state, const std::string& message) {
-//    if (stateCallback_) {
-//        stateCallback_(state, message);
-//    }
-//}
