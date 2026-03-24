@@ -60,7 +60,7 @@ struct TestFocusPoint {
       this.cameraStatus = `${state}: ${message}`;
     });
 
-    const result = nativeCamera.initCamera();
+    const result = nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
     hilog.info(DOMAIN, TAG, 'initCamera result: %{public}d', result);
     if (result === 0) {
       this.cameraStatus = '相机初始化成功';

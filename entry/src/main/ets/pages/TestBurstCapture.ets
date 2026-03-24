@@ -49,7 +49,7 @@ struct TestBurstCapture {
     });
 
     // 连拍测试页面用 BURST 模式初始化
-    const result = nativeCamera.initCamera(undefined, 1);  // 1 = BURST
+    const result = nativeCamera.initCamera(nativeCamera.CaptureMode.BURST);
     hilog.info(DOMAIN, TAG, 'initCamera result: %{public}d (BURST mode)', result);
     if (result === 0) {
       this.cameraStatus = '相机初始化成功';

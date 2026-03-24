@@ -52,7 +52,7 @@ struct TestFocusMagnifier {
       this.cameraStatus = `${state}: ${message}`;
     });
 
-    const result = nativeCamera.initCamera();
+    const result = nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
     if (result === 0) {
       this.cameraStatus = '相机初始化成功';
     } else {

@@ -351,26 +351,26 @@ static void onStateChanged(const std::string& state, const std::string& message)
 }
 
 static napi_value InitCamera(napi_env env, napi_callback_info info) {
-    // 支持两个可选参数：resourceManager 和 mode
+    // 参数：mode (必填), resourceManager (可选)
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
-    // 解析 mode 参数（第二个参数，可选，默认 SINGLE）
+    // 解析 mode 参数（第一个参数，必填）
     int32_t modeValue = 0;  // 默认 SINGLE
-    if (argc >= 2 && args[1] != nullptr) {
-        napi_get_value_int32(env, args[1], &modeValue);
+    if (argc >= 1 && args[0] != nullptr) {
+        napi_get_value_int32(env, args[0], &modeValue);
         OH_LOG_INFO(LOG_APP, "InitCamera with mode: %{public}d", modeValue);
     }
 
-    // 初始化 ResourceManager（第一个参数，可选）
-    if (argc >= 1 && args[0] != nullptr) {
+    // 初始化 ResourceManager（第二个参数，可选）
+    if (argc >= 2 && args[1] != nullptr) {
         // 释放之前可能存在的 ResourceManager
         if (g_resourceManager != nullptr) {
             OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
             g_resourceManager = nullptr;
         }
-        g_resourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[0]);
+        g_resourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[1]);
         if (g_resourceManager != nullptr) {
             OH_LOG_INFO(LOG_APP, "ResourceManager initialized successfully");
         } else {

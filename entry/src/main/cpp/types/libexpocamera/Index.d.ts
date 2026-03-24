@@ -132,11 +132,11 @@ export const registerPhotoErrorCallback: (callback: PhotoErrorCallback) => void;
 
 /**
  * 初始化相机
+ * @param mode 拍摄模式 (CaptureMode.SINGLE 或 CaptureMode.BURST)
  * @param resourceManager 可选的资源管理器，用于访问 rawfile（如需使用 mockStackProcess 则必须传入）
- * @param mode 可选的拍摄模式，默认 SINGLE。不同模式可能选择不同的摄像头。
  * @returns 0 成功，其他值表示错误码
  */
-export const initCamera: (resourceManager?: object, mode?: CaptureMode) => number;
+export const initCamera: (mode: CaptureMode, resourceManager?: object) => number;
 
 /**
  * 释放相机资源
