@@ -87,39 +87,9 @@ public:
     }
 
     // ==================== 解码接口 ====================
-
-    // 解码原始图像为 RGBA
-    // rawBuffer: 原始图像数据（格式可能是 JPEG/YUV 等）
-    // rawSize: 数据大小
-    // format: 输入格式（如果未知可传 UNKNOWN，会尝试自动检测）
-    // outRgbaBuffer: 输出 RGBA 像素数据（调用者负责 free）
-    // outSize: 输出数据大小
-    // outWidth, outHeight: 输出图像尺寸
-    // 返回: 是否成功
-    bool decode(void* rawBuffer, size_t rawSize, ImageFormat format,
-                uint8_t** outRgbaBuffer, size_t* outSize,
-                uint32_t* outWidth, uint32_t* outHeight);
     Bgra16Raw dngToBGRA16(const void *dng_data, size_t dng_size);
     Frame convertLibRawToBGRA16(libraw_processed_image_t* img);
     MeanRes MotionAnalysisAndStack(uint16_t *nativeBuffer1, uint16_t *nativeBuffer2, uint32_t width, uint32_t height);
-    // ==================== 编码接口 ====================
-
-    // 编码 RGBA 为 JPEG
-    // rgbaBuffer: RGBA 像素数据
-    // rgbaSize: 数据大小
-    // width, height: 图像尺寸
-    // quality: JPEG 质量 (1-100)
-    // outJpegBuffer: 输出 JPEG 数据（调用者负责 free）
-    // outJpegSize: 输出数据大小
-    // 返回: 是否成功
-    bool encodeJpeg(uint8_t* rgbaBuffer, size_t rgbaSize,
-                    uint32_t width, uint32_t height, int32_t quality,
-                    void** outJpegBuffer, size_t* outJpegSize);
-
-    // 编码 RGBA 为 PNG
-    bool encodePng(uint8_t* rgbaBuffer, size_t rgbaSize,
-                   uint32_t width, uint32_t height,
-                   void** outPngBuffer, size_t* outPngSize);
 
     // ==================== 堆叠接口 ====================
 
@@ -158,17 +128,8 @@ public:
     int32_t getProcessedFrames() const { return processedFrames_; }
 
 private:
-    // 内部解码实现
-    bool decodeJpeg(void* rawBuffer, size_t rawSize,
-                    uint8_t** outRgbaBuffer, size_t* outSize,
-                    uint32_t* outWidth, uint32_t* outHeight);
-
-    bool decodeNv21(void* rawBuffer, size_t rawSize,
-                    uint32_t width, uint32_t height,
-                    uint8_t** outRgbaBuffer, size_t* outSize);
-
     // 堆叠一帧到累积缓冲区
-    bool stackFrame(uint8_t* rgbaBuffer, bool isFirst);
+    bool stackFrame(uint16_t* bgraBuffer, bool isFirst);
 
     // 通知状态
     void notifyState(const std::string& state, const std::string& message);
@@ -187,12 +148,6 @@ private:
     // 图像尺寸
     uint32_t width_ = 0;
     uint32_t height_ = 0;
-
-    // 累积缓冲区（存储 float 累积值，用于精度保持）
-    float* accumulateBuffer_ = nullptr;
-
-    // 临时 RGBA 缓冲区
-    uint8_t* rgbaBuffer_ = nullptr;
 
     // TODO: 临时 - 用于直接透传原始 buffer（调试流程编排）
     void* passthroughBuffer_ = nullptr;

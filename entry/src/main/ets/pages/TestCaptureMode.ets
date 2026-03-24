@@ -56,9 +56,9 @@ struct TestCaptureMode {
       this.cameraStatus = `${state}: ${message}`;
     });
 
-    // 初始化相机
-    const result = nativeCamera.initCamera();
-    hilog.info(DOMAIN, TAG, 'initCamera result: %{public}d', result);
+    // 初始化相机（传入默认模式）
+    const result = nativeCamera.initCamera(undefined, this.currentMode);
+    hilog.info(DOMAIN, TAG, 'initCamera result: %{public}d, mode: %{public}d', result, this.currentMode);
     if (result === 0) {
       this.cameraStatus = '相机初始化成功';
     } else {

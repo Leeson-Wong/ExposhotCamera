@@ -54,25 +54,44 @@ CaptureManager::~CaptureManager() {
     release();
 }
 
-bool CaptureManager::init() {
+bool CaptureManager::init(CaptureMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    CM_LOG_INFO("[INIT_BEGIN] currentState=%{public}d, taskQueueRunning=%{public}d",
-                static_cast<int>(state_.load()), taskQueue_->isRunning());
+    CM_LOG_INFO("[INIT_BEGIN] mode=%{public}d, currentState=%{public}d, taskQueueRunning=%{public}d",
+                static_cast<int>(mode), static_cast<int>(state_.load()), taskQueue_->isRunning());
 
-    if (state_.load() != CaptureState::IDLE) {
-        CM_LOG_WARN("[INIT_FAILED] CaptureManager not in IDLE state");
-        return false;
+    // 如果已经初始化且模式相同，直接返回成功
+    if (state_.load() == CaptureState::IDLE && taskQueue_->isRunning()) {
+        // 检查 ExpoCamera 是否也已初始化
+        if (ExpoCamera::getInstance().isInitialized() && currentMode_ == mode) {
+            CM_LOG_INFO("[INIT_SKIP] Already initialized with same mode");
+            return true;
+        }
     }
 
-    // 确保之前的资源已释放
+    // 强制释放之前的资源（处理页面切换时新页面 init 在旧页面 release 之前的情况）
     if (taskQueue_->isRunning()) {
-        CM_LOG_WARN("[INIT_FORCE_STOP] TaskQueue still running, force stop first");
+        CM_LOG_INFO("[INIT_FORCE_STOP] Stopping previous task queue");
         taskQueue_->stop();
     }
+    processor_->reset();
+
+    // 清理 ExpoCamera 回调
+    ExpoCamera::getInstance().setPhotoCapturedCallback(nullptr);
+    ExpoCamera::getInstance().setPhotoErrorCallback(nullptr);
+
+    // 强制释放 ExpoCamera
+    ExpoCamera::getInstance().release();
+
+    // 重置状态
+    state_.store(CaptureState::IDLE);
+
+    // 保存当前模式
+    currentMode_ = mode;
 
     // 初始化下层 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
-    Camera_ErrorCode err = ExpoCamera::getInstance().init();
+    // 传入模式，让 ExpoCamera 选择正确的摄像头
+    Camera_ErrorCode err = ExpoCamera::getInstance().init(mode);
     if (err != CAMERA_OK) {
         CM_LOG_ERROR("[INIT_FAILED] ExpoCamera init failed: %{public}d", err);
         return false;
@@ -107,7 +126,10 @@ bool CaptureManager::init() {
 }
 
 void CaptureManager::release() {
-    CM_LOG_INFO("[RELEASE_BEGIN] currentState=%{public}d", static_cast<int>(state_.load()));
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    CM_LOG_INFO("[RELEASE_BEGIN] currentState=%{public}d, taskQueueRunning=%{public}d",
+                static_cast<int>(state_.load()), taskQueue_->isRunning());
 
     cancelBurst();
     taskQueue_->stop();
@@ -120,7 +142,10 @@ void CaptureManager::release() {
     // 释放下层 ExpoCamera
     ExpoCamera::getInstance().release();
 
-    CM_LOG_INFO("[RELEASE_DONE] CaptureManager released");
+    // 重置状态，允许再次初始化
+    state_.store(CaptureState::IDLE);
+
+    CM_LOG_INFO("[RELEASE_DONE] CaptureManager released, state reset to IDLE");
 }
 
 void CaptureManager::setProgressCallback(BurstProgressCallback callback) {
@@ -691,6 +716,42 @@ bool CaptureManager::isBurstActive() const {
 Camera_PhotoOutput* CaptureManager::getPhotoOutput() const {
     // 通过 ExpoCamera 获取 PhotoOutput
     return ExpoCamera::getInstance().getPhotoOutput();
+}
+
+int32_t CaptureManager::switchCaptureMode(CaptureMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 检查是否可以切换
+    if (!ExpoCamera::getInstance().canSwitchMode()) {
+        CM_LOG_WARN("[SWITCH_MODE_FAILED] Cannot switch mode: not ready");
+        return -1;  // 不满足切换条件
+    }
+
+    // 检查是否已经是目标模式
+    if (currentMode_ == mode) {
+        CM_LOG_INFO("[SWITCH_MODE_SKIP] Already in mode %{public}d", static_cast<int>(mode));
+        return 0;
+    }
+
+    CM_LOG_INFO("[SWITCH_MODE_BEGIN] Switching mode: %{public}d -> %{public}d",
+                static_cast<int>(currentMode_), static_cast<int>(mode));
+
+    // 调用 ExpoCamera 切换模式
+    Camera_ErrorCode err = ExpoCamera::getInstance().switchCaptureMode(mode);
+    if (err != CAMERA_OK) {
+        CM_LOG_ERROR("[SWITCH_MODE_FAILED] ExpoCamera switchCaptureMode failed: %{public}d", err);
+        return static_cast<int32_t>(err);
+    }
+
+    // 同步更新当前模式
+    currentMode_ = mode;
+
+    CM_LOG_INFO("[SWITCH_MODE_DONE] Mode switched to %{public}d", static_cast<int>(mode));
+    return 0;
+}
+
+bool CaptureManager::canSwitchMode() const {
+    return ExpoCamera::getInstance().canSwitchMode() && !isCaptureActive();
 }
 
 } // namespace exposhot

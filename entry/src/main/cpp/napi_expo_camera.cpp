@@ -351,11 +351,19 @@ static void onStateChanged(const std::string& state, const std::string& message)
 }
 
 static napi_value InitCamera(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value args[1] = {nullptr};
+    // 支持两个可选参数：resourceManager 和 mode
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
-    // 初始化 ResourceManager（如果传入了参数）
+    // 解析 mode 参数（第二个参数，可选，默认 SINGLE）
+    int32_t modeValue = 0;  // 默认 SINGLE
+    if (argc >= 2 && args[1] != nullptr) {
+        napi_get_value_int32(env, args[1], &modeValue);
+        OH_LOG_INFO(LOG_APP, "InitCamera with mode: %{public}d", modeValue);
+    }
+
+    // 初始化 ResourceManager（第一个参数，可选）
     if (argc >= 1 && args[0] != nullptr) {
         // 释放之前可能存在的 ResourceManager
         if (g_resourceManager != nullptr) {
@@ -373,7 +381,9 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
     }
 
     // 通过 CaptureManager 初始化（内部会初始化 ExpoCamera 并注册回调）
-    bool success = exposhot::CaptureManager::getInstance().init();
+    // 传入模式，让底层选择正确的摄像头
+    CaptureMode mode = (modeValue == 1) ? CaptureMode::BURST : CaptureMode::SINGLE;
+    bool success = exposhot::CaptureManager::getInstance().init(mode);
 
     int32_t result = success ? 0 : -1;
 
@@ -1126,29 +1136,25 @@ static napi_value SwitchCaptureMode(napi_env env, napi_callback_info info) {
 
     CaptureMode mode = (modeValue == 1) ? CaptureMode::BURST : CaptureMode::SINGLE;
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.switchCaptureMode(mode);
+    // 通过 CaptureManager 统一切换模式，内部会调用 ExpoCamera 并同步状态
+    int32_t err = exposhot::CaptureManager::getInstance().switchCaptureMode(mode);
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
 // 获取当前拍摄模式
 static napi_value GetCaptureMode(napi_env env, napi_callback_info info) {
-    ExpoCamera& camera = ExpoCamera::getInstance();
-
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(camera.getCaptureMode()), &result);
+    napi_create_int32(env, static_cast<int32_t>(exposhot::CaptureManager::getInstance().getCaptureMode()), &result);
     return result;
 }
 
 // 检查是否可以切换模式
 static napi_value CanSwitchMode(napi_env env, napi_callback_info info) {
-    ExpoCamera& camera = ExpoCamera::getInstance();
-
     napi_value result;
-    napi_get_boolean(env, camera.canSwitchMode(), &result);
+    napi_get_boolean(env, exposhot::CaptureManager::getInstance().canSwitchMode(), &result);
     return result;
 }
 
@@ -1585,7 +1591,7 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
     exposhot::CaptureManager::getInstance().setImageCallback(onBurstImageCallback);
 
     // 初始化并启动连拍
-    if (!exposhot::CaptureManager::getInstance().init()) {
+    if (!exposhot::CaptureManager::getInstance().init(CaptureMode::BURST)) {
         OH_LOG_ERROR(LOG_APP, "Failed to init CaptureManager");
     }
 

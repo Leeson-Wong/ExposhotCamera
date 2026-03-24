@@ -7,6 +7,7 @@
 #include <functional>
 #include "task_queue.h"
 #include "image_processor.h"
+#include "expo_camera.h"  // 使用全局 CaptureMode
 #include "ohcamera/photo_output.h"
 
 namespace exposhot {
@@ -20,12 +21,6 @@ enum class CaptureState {
     COMPLETED = 4,         // 连拍完成
     ERROR = 5,             // 错误
     CANCELLED = 6          // 已取消
-};
-
-// 拍摄模式
-enum class CaptureMode {
-    SINGLE,    // 单次拍照
-    BURST      // 连拍
 };
 
 // 连拍配置
@@ -116,7 +111,8 @@ public:
     static CaptureManager& getInstance();
 
     // 初始化/释放
-    bool init();
+    // mode: 初始化时指定拍摄模式，传递给 ExpoCamera::init
+    bool init(CaptureMode mode);
     void release();
 
     // 设置回调
@@ -177,6 +173,15 @@ public:
 
     // 获取 PhotoOutput（用于触发拍照）
     Camera_PhotoOutput* getPhotoOutput() const;
+
+    // 切换拍摄模式（统一入口，同步更新 currentMode_ 和 ExpoCamera）
+    int32_t switchCaptureMode(CaptureMode mode);
+
+    // 获取当前拍摄模式
+    CaptureMode getCaptureMode() const { return currentMode_; }
+
+    // 检查是否可以切换模式
+    bool canSwitchMode() const;
 
 private:
     CaptureManager();

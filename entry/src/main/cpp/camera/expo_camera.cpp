@@ -17,13 +17,17 @@ ExpoCamera::~ExpoCamera() {
     release();
 }
 
-Camera_ErrorCode ExpoCamera::init() {
+Camera_ErrorCode ExpoCamera::init(CaptureMode mode) {
 //    std::lock_guard<std::mutex> lock(mutex_);
 
     if (initialized_) {
         OH_LOG_INFO(LOG_APP, "ExpoCamera already initialized");
         return CAMERA_OK;
     }
+
+    // 保存当前模式
+    currentMode_ = mode;
+    OH_LOG_INFO(LOG_APP, "Initializing with mode: %{public}d", static_cast<int>(mode));
 
     // 创建 CameraManager
     Camera_ErrorCode err = OH_Camera_GetCameraManager(&cameraManager_);
@@ -43,13 +47,19 @@ Camera_ErrorCode ExpoCamera::init() {
 
     OH_LOG_INFO(LOG_APP, "Found %{public}u cameras", cameraCount_);
 
-    // 查找后置摄像头
-    for (uint32_t i = 0; i < cameraCount_; i++) {
-        if (cameras_[i].cameraPosition == CAMERA_POSITION_BACK) {
-            currentCameraIndex_ = i;
-            break;
-        }
+    // 根据模式选择摄像头
+    int32_t selectedIndex = selectCameraForMode(mode);
+    if (selectedIndex < 0) {
+        OH_LOG_ERROR(LOG_APP, "No suitable camera found for mode: %{public}d", static_cast<int>(mode));
+        OH_CameraManager_DeleteSupportedCameras(cameraManager_, cameras_, cameraCount_);
+        cameras_ = nullptr;
+        OH_Camera_DeleteCameraManager(cameraManager_);
+        cameraManager_ = nullptr;
+        return CAMERA_INVALID_ARGUMENT;
     }
+    currentCameraIndex_ = static_cast<uint32_t>(selectedIndex);
+    OH_LOG_INFO(LOG_APP, "Selected camera index: %{public}u for mode: %{public}d",
+                currentCameraIndex_, static_cast<int>(mode));
 
     // 创建 CameraInput
     err = createCameraInput();
@@ -1356,6 +1366,44 @@ int32_t ExpoCamera::selectPhotoProfileForMode(CaptureMode mode) {
 
     OH_LOG_INFO(LOG_APP, "Selected profile index: %{public}d", selectedIndex);
     return selectedIndex;
+}
+
+int32_t ExpoCamera::selectCameraForMode(CaptureMode mode) {
+    if (cameras_ == nullptr || cameraCount_ == 0) {
+        OH_LOG_ERROR(LOG_APP, "No cameras available");
+        return -1;
+    }
+
+    // TODO: 物理摄像头选择逻辑待实现
+    // 当前使用逻辑摄像头选择（根据 Camera_Position）
+    // 未来需要根据模式选择不同的物理摄像头:
+    // - SINGLE: 主摄像头（高分辨率）
+    // - BURST: 专用连拍摄像头（如果存在）
+
+    OH_LOG_INFO(LOG_APP, "Selecting camera for mode: %{public}d", static_cast<int>(mode));
+
+    // 打印所有相机信息
+    for (uint32_t i = 0; i < cameraCount_; i++) {
+        OH_LOG_INFO(LOG_APP, "  Camera[%{public}u]: position=%{public}d, type=%{public}d",
+                    i, cameras_[i].cameraPosition, cameras_[i].cameraType);
+    }
+
+    // 目前暂时选择后置摄像头
+    // 未来根据 mode 选择不同的物理摄像头
+    for (uint32_t i = 0; i < cameraCount_; i++) {
+        if (cameras_[i].cameraPosition == CAMERA_POSITION_BACK) {
+            OH_LOG_INFO(LOG_APP, "Selected camera index: %{public}u (BACK)", i);
+            return static_cast<int32_t>(i);
+        }
+    }
+
+    // 如果没有后置摄像头，返回第一个
+    if (cameraCount_ > 0) {
+        OH_LOG_WARN(LOG_APP, "No BACK camera found, using first camera");
+        return 0;
+    }
+
+    return -1;
 }
 
 //void ExpoCamera::notifyState(const std::string& state, const std::string& message) {

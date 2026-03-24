@@ -54,7 +54,8 @@ public:
     static ExpoCamera& getInstance();
 
     // 生命周期
-    Camera_ErrorCode init();
+    // mode: 初始化时指定拍摄模式，不同模式可能选择不同的摄像头
+    Camera_ErrorCode init(CaptureMode mode = CaptureMode::SINGLE);
     Camera_ErrorCode release();
 
     // Surface 管理
@@ -135,6 +136,7 @@ private:
 
     // 模式切换相关
     int32_t selectPhotoProfileForMode(CaptureMode mode);
+    int32_t selectCameraForMode(CaptureMode mode);
 
     // 不加锁的内部版本（供内部调用）
     Camera_ErrorCode startPreviewInternal(const std::string& surfaceId);
