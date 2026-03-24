@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { image } from '@kit.ImageKit';
 import { router } from '@kit.ArkUI';
 import { componentSnapshot } from '@kit.ArkUI';
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
 
 const DOMAIN = 0x3200;
 const TAG = 'TestFocusMagnifier';
@@ -17,6 +18,8 @@ const MAGNIFIER_UPDATE_INTERVAL = 100; // 内容更新间隔(ms)
 @Entry
 @Component
 struct TestFocusMagnifier {
+  @StorageProp(SAFE_AREA_TOP) safeTop: number = 0;
+  @StorageProp(SAFE_AREA_BOTTOM) safeBottom: number = 0;
   @State cameraStatus: string = '未初始化';
   @State photoReady: boolean = false;
   @State slotId: string = '';
@@ -359,7 +362,7 @@ struct TestFocusMagnifier {
           .fontColor(this.hasPreview ? Color.Green : Color.Gray)
       }
       .width('100%')
-      .padding(12)
+      .padding({ top: this.safeTop + 8, left: 12, right: 12, bottom: 8 })
       .backgroundColor('#80000000')
 
       // 状态信息
@@ -593,7 +596,7 @@ struct TestFocusMagnifier {
           })
       }
       .width('100%')
-      .padding(16)
+      .padding({ left: 16, right: 16, top: 8, bottom: this.safeBottom + 16 })
       .justifyContent(FlexAlign.Center)
     }
     .width('100%')

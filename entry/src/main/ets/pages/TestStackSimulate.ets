@@ -1,6 +1,7 @@
 import nativeCamera from 'libexpocamera.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { router } from '@kit.ArkUI';
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
 
 const DOMAIN = 0x3200;
 const TAG = 'TestStackSimulate';
@@ -23,6 +24,8 @@ interface MockFrame {
 @Entry
 @Component
 struct TestStackSimulate {
+    @StorageProp(SAFE_AREA_TOP) safeTop: number = 0;
+    @StorageProp(SAFE_AREA_BOTTOM) safeBottom: number = 0;
     @State cameraStatus: string = '未初始化';
     @State surfaceId: string = '';
     @State cameraInitialized: boolean = false;
@@ -218,7 +221,7 @@ struct TestStackSimulate {
                 }
             }
             .width('100%')
-            .padding(12)
+            .padding({ top: this.safeTop + 8, left: 12, right: 12, bottom: 8 })
             .backgroundColor('#80000000')
 
             // 状态信息
@@ -474,7 +477,7 @@ struct TestStackSimulate {
                     .alignItems(HorizontalAlign.Center)
                 }
                 .width('100%')
-                .padding({ top: 8, bottom: 16 })
+                .padding({ top: 8, bottom: this.safeBottom + 16 })
                 .justifyContent(FlexAlign.SpaceEvenly)
             }
             .width('100%')

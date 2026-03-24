@@ -2,9 +2,10 @@ import nativeCamera from 'libexpocamera.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { image } from '@kit.ImageKit';
 import { router } from '@kit.ArkUI';
+import { SAFE_AREA_TOP, SAFE_AREA_BOTTOM } from '../util/WindowManager';
 
 const DOMAIN = 0x3200;
-const TAG = 'TestFullFeatures';
+const TAG = 'TestSlotSwitch';
 
 // 对焦模式枚举（与 C++ 侧保持一致）
 enum FocusMode {
@@ -29,6 +30,8 @@ interface SlotInfo {
 @Entry
 @Component
 struct TestFullFeatures {
+  @StorageProp(SAFE_AREA_TOP) safeTop: number = 0;
+  @StorageProp(SAFE_AREA_BOTTOM) safeBottom: number = 0;
   @State cameraStatus: string = '未初始化';
   @State activeSlotId: string = '';
   @State photoReady: boolean = false;
@@ -249,7 +252,7 @@ struct TestFullFeatures {
       }
       .width('100%')
       .backgroundColor('#80000000')
-      .padding(12)
+      .padding({ top: this.safeTop + 8, left: 12, right: 12, bottom: 8 })
 
       // 双 Surface 预览区域
       Column() {
@@ -392,7 +395,7 @@ struct TestFullFeatures {
           })
       }
       .width('100%')
-      .padding(16)
+      .padding({ left: 16, right: 16, top: 8, bottom: this.safeBottom + 16 })
       .justifyContent(FlexAlign.SpaceEvenly)
     }
     .width('100%')

@@ -56,9 +56,9 @@ struct Index {
           'pages/TestCaptureMode'
         )
 
-        // 完整功能测试（双 Slot）
+        // Slot 切换测试（双 Slot）
         this.buildTestEntry(
-          '完整功能测试',
+          'Slot 切换测试',
           '双预览、Slot 切换、完整相机控制',
           'pages/TestFullFeatures'
         )
