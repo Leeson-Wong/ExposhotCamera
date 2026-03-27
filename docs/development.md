@@ -896,6 +896,418 @@ struct TestPage {
 
 ---
 
+## 暗场处理集成方案
+
+### 开发日期
+2026-03-26（规划）
+
+### 背景与目标
+
+天文摄影长曝光时，传感器会产生热噪声和固定模式噪声。暗场校正通过减去同样条件下拍摄的暗场（完全遮光）来消除这些噪声。
+
+**目标**：
+1. 预处理阶段：接收暗场 DNG，解析并存储到沙箱，返回沙箱地址
+2. 拍摄阶段：连拍时自动应用暗场校正
+
+### LibRaw 处理流程中的调用时机
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LibRaw 处理流程                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  open_buffer()          打开 DNG 数据，解析元数据                            │
+│       │                                                                     │
+│       ▼                                                                     │
+│  unpack()               解包 RAW 数据到 raw_image[]                          │
+│       │                                                                     │
+│       │   ┌─────────────────────────────────────────────────────────────┐   │
+│       │   │  ★ 暗场减法就在这里 ★                                        │   │
+│       │   │  processor.subtract(raw);  // 直接操作 raw_image[]          │   │
+│       │   │  减法在 Bayer RAW 数据上进行，还未去马赛克                    │   │
+│       │   └─────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  dcraw_process()        去马赛克、白平衡、色彩转换等                         │
+│       │                                                                     │
+│       ▼                                                                     │
+│  dcraw_make_mem_image() 输出处理后的 RGB 图像                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**为什么必须在 `unpack()` 之后、`dcraw_process()` 之前？**
+
+1. **unpack() 之后**：此时 `raw.imgdata.rawdata.raw_image` 包含原始 Bayer 数据
+2. **dcraw_process() 之前**：去马赛克等操作会改变像素值，必须在原始数据上减暗场
+3. **关键**：暗场数据也是 Bayer RAW，必须同格式相减
+
+### 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            暗场处理架构                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        ArkTS UI Layer                                │   │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
+│  │  │ 导入暗场 DNG     │  │ 查看暗场状态     │  │ 拍摄时自动应用   │  │   │
+│  │  └────────┬─────────┘  └──────────────────┘  └──────────────────┘  │   │
+│  │           │                                                         │   │
+│  └───────────┼─────────────────────────────────────────────────────────┘   │
+│              │ NAPI                                                        │
+│              ▼                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         C++ Native Layer                              │ │
+│  │                                                                       │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                    DarkFieldManager (新增)                       │ │ │
+│  │  │                                                                  │ │ │
+│  │  │  - loadDarkFrame(dngData, size) → path                          │ │ │
+│  │  │  - loadDarkFieldBin(path)                                       │ │ │
+│  │  │  - getDarkFieldPath() → path                                    │ │ │
+│  │  │  - isDarkFieldLoaded() → bool                                   │ │ │
+│  │  │  - clearDarkField()                                             │ │ │
+│  │  │                                                                  │ │ │
+│  │  │  内部使用:                                                       │ │ │
+│  │  │  - DarkFieldPreprocessor (预处理)                               │ │ │
+│  │  │  - DarkFieldProcessor (实时减法)                                │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                │                                      │ │
+│  │                                ▼                                      │ │
+│  │  ┌─────────────────────────────────────────────────────────────────┐ │ │
+│  │  │                    ImageProcessor (修改)                         │ │ │
+│  │  │                                                                  │ │ │
+│  │  │  dngToBGRA16() {                                                │ │ │
+│  │  │      raw.open_buffer(...);                                      │ │ │
+│  │  │      raw.unpack();                                              │ │ │
+│  │  │      // ★ 新增：暗场减法                                        │ │ │
+│  │  │      if (darkFieldManager_.isLoaded()) {                        │ │ │
+│  │  │          darkFieldManager_.subtract(raw);                       │ │ │
+│  │  │      }                                                          │ │ │
+│  │  │      raw.dcraw_process();                                       │ │ │
+│  │  │      ...                                                        │ │ │
+│  │  │  }                                                              │ │ │
+│  │  └─────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                           沙箱存储                                    │ │
+│  │                                                                       │ │
+│  │  /data/service/el2/user/0/com.exposhot.camera/files/                 │ │
+│  │  ├── dark_field.bin          (预处理后的暗场数据)                     │ │
+│  │  └── dark_field_meta.json    (元数据：尺寸、Bayer模式等)              │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `camera/dark_field_manager.h` | 暗场管理器头文件 |
+| `camera/dark_field_manager.cpp` | 暗场管理器实现 |
+| `camera/dark/dark_field.hpp` | 已存在，预处理+处理核心 |
+
+### 新增 API
+
+#### NAPI 接口
+
+```cpp
+// 导入暗场 DNG（支持多帧）
+// 返回：沙箱路径，失败返回空字符串
+std::string LoadDarkFrame(void* dngData, size_t size);
+
+// 添加更多暗场帧（叠加平均，减少噪声）
+bool AddDarkFrame(void* dngData, size_t size);
+
+// 完成暗场预处理（平均并保存）
+bool FinalizeDarkField();
+
+// 获取当前暗场路径
+std::string GetDarkFieldPath();
+
+// 检查暗场是否已加载
+bool IsDarkFieldLoaded();
+
+// 清除暗场
+void ClearDarkField();
+```
+
+#### ArkTS 接口
+
+```typescript
+interface DarkFieldAPI {
+  // 单帧暗场
+  loadDarkFrame(dngBuffer: ArrayBuffer): Promise<string>;
+
+  // 多帧暗场（推荐）
+  startDarkFieldCapture(): void;
+  addDarkFrame(dngBuffer: ArrayBuffer): Promise<boolean>;
+  finalizeDarkField(): Promise<string>;
+
+  // 状态查询
+  getDarkFieldPath(): string | null;
+  isDarkFieldLoaded(): boolean;
+  clearDarkField(): void;
+}
+```
+
+### 数据流程
+
+#### 1. 暗场预处理流程
+
+```
+用户导入暗场 DNG
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  LoadDarkFrame(dngData, size)                            │
+│                                                          │
+│  1. LibRaw.open_buffer(dngData, size)                   │
+│  2. LibRaw.unpack()                                      │
+│  3. 提取 raw_image[] + 元数据                            │
+│  4. DarkFieldPreprocessor.addDarkData(...)              │
+│  5. (多帧时) DarkFieldPreprocessor.average()            │
+│  6. 生成文件名: dark_field_{timestamp}.bin              │
+│  7. DarkFieldPreprocessor.save(sandboxPath)             │
+│  8. 记录当前暗场路径                                      │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+  返回沙箱路径: /data/.../files/dark_field_xxx.bin
+```
+
+#### 2. 拍摄时暗场处理流程
+
+```
+连拍捕获 DNG
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  ImageProcessor::dngToBGRA16(dngData, size)              │
+│                                                          │
+│  1. LibRaw.open_buffer(dngData, size)                   │
+│  2. LibRaw.unpack()                                      │
+│  3. ★ if (darkFieldManager_.isLoaded())                 │
+│        darkFieldManager_.subtract(raw);  // 暗场减法     │
+│  4. LibRaw.dcraw_process()                              │
+│  5. LibRaw.dcraw_make_mem_image()                       │
+│  6. 转换为 BGRA16                                        │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+  堆叠处理（后续帧）
+```
+
+### 代码集成点
+
+#### 1. ImageProcessor 修改
+
+```cpp
+// image_processor.h
+#include "dark/dark_field.hpp"
+
+class ImageProcessor {
+public:
+    // 新增：设置暗场管理器引用
+    void setDarkFieldManager(DarkFieldManager* manager) {
+        darkFieldManager_ = manager;
+    }
+
+private:
+    DarkFieldManager* darkFieldManager_ = nullptr;
+};
+
+// image_processor.cpp
+Bgra16Raw ImageProcessor::dngToBGRA16(const void *dng_data, size_t dng_size) {
+    LibRaw processor;
+
+    int ret = processor.open_buffer(const_cast<void *>(dng_data), dng_size);
+    if (ret != LIBRAW_SUCCESS)
+        throw std::runtime_error(std::string("open_buffer 失败: ") + libraw_strerror(ret));
+
+    ret = processor.unpack();
+    if (ret != LIBRAW_SUCCESS)
+        throw std::runtime_error(std::string("unpack 失败: ") + libraw_strerror(ret));
+
+    // ★ 新增：暗场减法
+    if (darkFieldManager_ && darkFieldManager_->isLoaded()) {
+        darkFieldManager_->subtract(processor);
+    }
+
+    // 后续处理不变...
+    libraw_output_params_t &params = processor.imgdata.params;
+    params.output_bps = 16;
+    // ...
+}
+```
+
+#### 2. DarkFieldManager 新增
+
+```cpp
+// dark_field_manager.h
+#pragma once
+
+#include "dark/dark_field.hpp"
+#include "libraw.h"
+#include <string>
+#include <mutex>
+
+namespace exposhot {
+
+class DarkFieldManager {
+public:
+    static DarkFieldManager& getInstance();
+
+    // 加载暗场 DNG（单帧或多帧）
+    bool loadDarkFrame(const void* dngData, size_t size);
+    bool addDarkFrame(const void* dngData, size_t size);
+    bool finalizeDarkField();  // 多帧取平均并保存
+
+    // 加载已预处理的暗场文件
+    bool loadFromFile(const std::string& path);
+
+    // 对 LibRaw 对象执行暗场减法
+    bool subtract(LibRaw& raw);
+
+    // 状态查询
+    bool isLoaded() const;
+    std::string getPath() const;
+    uint32_t getWidth() const;
+    uint32_t getHeight() const;
+
+    // 清除
+    void clear();
+
+private:
+    DarkFieldManager();
+    ~DarkFieldManager() = default;
+
+    std::mutex mutex_;
+    DarkFieldPreprocessor preprocessor_;
+    DarkFieldProcessor processor_;
+    std::string currentPath_;
+    bool isPreprocessing_ = false;  // 正在添加暗场帧
+};
+
+} // namespace exposhot
+```
+
+#### 3. NAPI 绑定
+
+```cpp
+// napi_expo_camera.cpp 新增
+
+static napi_value LoadDarkFrame(napi_env env, napi_callback_info info) {
+    // 1. 获取 ArrayBuffer 参数
+    // 2. 调用 DarkFieldManager::loadDarkFrame()
+    // 3. 返回沙箱路径字符串
+}
+
+static napi_value AddDarkFrame(napi_env env, napi_callback_info info) {
+    // 多帧暗场时使用
+}
+
+static napi_value FinalizeDarkField(napi_env env, napi_callback_info info) {
+    // 完成预处理
+}
+
+static napi_value GetDarkFieldPath(napi_env env, napi_callback_info info) {
+    // 返回当前暗场路径
+}
+
+static napi_value IsDarkFieldLoaded(napi_env env, napi_callback_info info) {
+    // 返回 bool
+}
+
+static napi_value ClearDarkField(napi_env env, napi_callback_info info) {
+    // 清除暗场
+}
+
+// 注册到 exports
+napi_property_descriptor desc[] = {
+    // ... 现有接口
+    {"loadDarkFrame", nullptr, LoadDarkFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"addDarkFrame", nullptr, AddDarkFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"finalizeDarkField", nullptr, FinalizeDarkField, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"getDarkFieldPath", nullptr, GetDarkFieldPath, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isDarkFieldLoaded", nullptr, IsDarkFieldLoaded, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"clearDarkField", nullptr, ClearDarkField, nullptr, nullptr, nullptr, napi_default, nullptr},
+};
+```
+
+### 沙箱路径管理
+
+```cpp
+// file_saver.h 新增接口
+class FileSaver {
+public:
+    // 获取暗场存储目录
+    std::string getDarkFieldDir() const {
+        return saveDir_ + "/dark_fields";
+    }
+
+    // 生成暗场文件名
+    std::string generateDarkFieldPath() const {
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+        return getDarkFieldDir() + "/dark_field_" + std::to_string(timestamp) + ".bin";
+    }
+};
+```
+
+### 文件格式 (dark_field.bin)
+
+已定义在 `dark_field.hpp` 中：
+
+```
+Header: 32 bytes
+  [0-3]   Magic: "DARK"
+  [4-7]   Version: uint32_t (1)
+  [8-11]  Width: uint32_t
+  [12-15] Height: uint32_t
+  [16-19] Bayer Pattern (0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG)
+  [20-23] Black Level: uint32_t
+  [24-31] Reserved/CRC32
+Data:
+  [32+]   Raw pixels (width * height * 2 bytes, uint16_t)
+```
+
+### 开发步骤
+
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| 1 | 创建 `dark_field_manager.h/cpp` | ⬜ |
+| 2 | 实现 `loadDarkFrame()` - 单帧 DNG 解析并保存 | ⬜ |
+| 3 | 实现 `addDarkFrame()` + `finalizeDarkField()` - 多帧叠加平均 | ⬜ |
+| 4 | 实现 `subtract()` - 对 LibRaw 执行暗场减法 | ⬜ |
+| 5 | 修改 `ImageProcessor::dngToBGRA16()` 集成暗场减法 | ⬜ |
+| 6 | 添加 NAPI 绑定 | ⬜ |
+| 7 | 添加 ArkTS 接口和类型定义 | ⬜ |
+| 8 | 创建测试页面 `TestDarkField.ets` | ⬜ |
+| 9 | 端到端测试 | ⬜ |
+
+### 验证清单
+
+- [ ] 单帧暗场导入成功
+- [ ] 多帧暗场叠加平均成功
+- [ ] 暗场文件正确保存到沙箱
+- [ ] 返回的沙箱路径可访问
+- [ ] 拍摄时暗场减法正确执行
+- [ ] 尺寸不匹配时正确处理（警告或跳过）
+- [ ] 清除暗场后拍摄正常（不减暗场）
+- [ ] 暗场效果验证（对比处理前后图像）
+
+---
+
 ## 注意事项
 
 1. **HarmonyOS Image Native API**: 使用的 API 可能需要根据实际文档调整

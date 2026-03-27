@@ -97,8 +97,8 @@ struct TestStackSimulate {
         this.processNextFrame();
     }
 
-    // 处理下一帧
-    processNextFrame(): void {
+    // 处理下一帧（异步版本，不阻塞 UI）
+    async processNextFrame(): Promise<void> {
         if (this.currentFrameIndex >= this.frameCount) {
             // 所有帧处理完成
             this.stackState = StackState.COMPLETED;
@@ -109,43 +109,53 @@ struct TestStackSimulate {
             return;
         }
 
-        // 调用 NDK 接口处理当前帧，传入 surfaceId
-        const result = nativeCamera.mockStackProcess(this.surfaceId, this.currentFrameIndex);
+        try {
+            this.cameraStatus = `处理帧 ${this.currentFrameIndex + 1}/${this.frameCount}...`;
 
-        hilog.info(DOMAIN, TAG, 'MockStackProcess result: success=%{public}s, next=%{public}d, msg=%{public}s',
-                  result.success.toString(), result.nextFrameIndex, result.message);
+            // ★ 异步调用 NDK 接口，不会阻塞 UI
+            const result = await nativeCamera.mockStackProcess(this.surfaceId, this.currentFrameIndex);
 
-        if (result.success) {
-            // 记录已处理的帧
-            this.frames.push({
-                id: this.currentFrameIndex,
-                timestamp: Date.now(),
-                processed: true
-            });
+            hilog.info(DOMAIN, TAG,
+                'MockStackProcess result: success=%{public}s, next=%{public}d, msg=%{public}s, dx=[%{public}f,%{public}f], dy=[%{public}f,%{public}f]',
+                result.success.toString(), result.nextFrameIndex, result.message,
+                result.dx?.[0] ?? 0, result.dx?.[1] ?? 0,
+                result.dy?.[0] ?? 0, result.dy?.[1] ?? 0);
 
-            this.currentFrameIndex = result.nextFrameIndex;
-            this.progress = Math.floor((this.currentFrameIndex / this.frameCount) * 100);
-            this.cameraStatus = `堆叠中... ${this.currentFrameIndex}/${this.frameCount}`;
-            this.stackResultMessage = result.message;
+            if (result.success) {
+                // 记录已处理的帧
+                this.frames.push({
+                    id: this.currentFrameIndex,
+                    timestamp: Date.now(),
+                    processed: true
+                });
 
-            // 延迟后处理下一帧
-            if (this.currentFrameIndex < this.frameCount) {
-                setTimeout(() => {
+                this.currentFrameIndex = result.nextFrameIndex;
+                this.progress = Math.floor((this.currentFrameIndex / this.frameCount) * 100);
+                this.cameraStatus = `堆叠中... ${this.currentFrameIndex}/${this.frameCount}`;
+                this.stackResultMessage = `${result.message} (dx: ${result.dx}, dy: ${result.dy})`;
+
+                // 继续处理下一帧（异步操作本身有耗时，无需额外延迟）
+                if (this.stackState === StackState.STACKING && this.currentFrameIndex < this.frameCount) {
                     this.processNextFrame();
-                }, this.delayMs);
+                } else if (this.currentFrameIndex >= this.frameCount) {
+                    // 最后一帧处理完成
+                    this.stackState = StackState.COMPLETED;
+                    this.progress = 100;
+                    this.stackResultMessage = `堆叠完成！共处理 ${this.frameCount} 帧`;
+                    this.cameraStatus = this.stackResultMessage;
+                    hilog.info(DOMAIN, TAG, 'Mock stacking completed successfully');
+                }
             } else {
-                // 最后一帧处理完成
-                this.stackState = StackState.COMPLETED;
-                this.progress = 100;
-                this.stackResultMessage = `堆叠完成！共处理 ${this.frameCount} 帧`;
-                this.cameraStatus = this.stackResultMessage;
-                hilog.info(DOMAIN, TAG, 'Mock stacking completed successfully');
+                this.stackState = StackState.ERROR;
+                this.cameraStatus = `堆叠失败: ${result.error || result.message}`;
+                this.stackResultMessage = result.error || result.message;
+                hilog.error(DOMAIN, TAG, 'Mock stacking failed: %{public}s', result.error || result.message);
             }
-        } else {
+        } catch (err) {
             this.stackState = StackState.ERROR;
-            this.cameraStatus = `堆叠失败: ${result.message}`;
-            this.stackResultMessage = result.message;
-            hilog.error(DOMAIN, TAG, 'Mock stacking failed: %{public}s', result.message);
+            this.cameraStatus = `异常: ${err}`;
+            this.stackResultMessage = `异常: ${err}`;
+            hilog.error(DOMAIN, TAG, 'Mock stacking exception: %{public}s', String(err));
         }
     }
 

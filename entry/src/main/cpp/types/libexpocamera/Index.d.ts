@@ -487,16 +487,24 @@ export interface MockStackResult {
     success: boolean;           // 是否成功
     nextFrameIndex: number;     // 下一帧索引
     message: string;            // 结果消息
+    error?: string;             // 错误信息（失败时）
+    fileName?: string;          // 处理的文件名
+    fileSize?: number;          // 文件大小
+    width?: number;             // 图像宽度
+    height?: number;            // 图像高度
+    dx?: number[];              // X 方向偏移量 [dx0, dx1]
+    dy?: number[];              // Y 方向偏移量 [dy0, dy1]
+    buffer?: ArrayBuffer;       // 原始 DNG 数据
 }
 
 /**
- * 模拟堆叠过程（空实现，用于测试 UI 交互）
- * 不对接相机，只模拟堆叠流程
+ * 模拟堆叠过程（异步版本，不阻塞 UI）
+ * 读取 rawfile 中的 DNG 文件进行解码和堆叠处理
  * @param surfaceId Surface ID（用于标识预览流）
  * @param frameIndex 当前处理的帧索引
- * @returns 堆叠结果
+ * @returns Promise，解析后返回堆叠结果
  */
 export const mockStackProcess: (
     surfaceId: string,
     frameIndex: number
-) => MockStackResult;
+) => Promise<MockStackResult>;

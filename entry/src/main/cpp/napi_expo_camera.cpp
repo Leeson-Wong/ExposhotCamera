@@ -1672,164 +1672,267 @@ static napi_value SetBurstImageSize(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// 模拟堆叠过程（读取 RAWFILE 文件到内存，用于测试堆叠功能）
+// ==================== MockStackProcess 异步实现 ====================
+
+// 异步工作数据结构
+typedef struct {
+    napi_async_work asyncWork;
+    napi_deferred deferred;
+
+    // 输入参数
+    int32_t frameIndex;
+
+    // 中间数据（工作线程填充）
+    void* dngBuffer;
+    size_t dngSize;
+    int fileIndex;
+    std::string fileName;
+
+    // 输出结果（工作线程填充）
+    bool success;
+    std::string errorMsg;
+    exposhot::Bgra16Raw bgra16Raw;
+    std::vector<float> dx;
+    std::vector<float> dy;
+} MockStackAsyncData;
+
+// 定义测试用的 DNG 文件列表
+static const char* RAW_FILE_LIST[] = {
+    "IMG_20260314_010259.dng",
+    "IMG_20260314_010348.dng",
+    "IMG_20260314_010521.dng",
+    "IMG_20260314_010555.dng"
+};
+static const int RAW_FILE_COUNT = 4;
+
+// 工作线程执行函数
+static void MockStackExecute(napi_env env, void* data) {
+    MockStackAsyncData* asyncData = (MockStackAsyncData*)data;
+
+    OH_LOG_INFO(LOG_APP, "MockStackExecute: frameIndex=%{public}d (worker thread)", asyncData->frameIndex);
+
+    // 检查 ResourceManager
+    if (g_resourceManager == nullptr) {
+        asyncData->success = false;
+        asyncData->errorMsg = "ResourceManager not initialized";
+        return;
+    }
+
+    // 选择文件
+    asyncData->fileIndex = asyncData->frameIndex % RAW_FILE_COUNT;
+    asyncData->fileName = RAW_FILE_LIST[asyncData->fileIndex];
+
+    OH_LOG_INFO(LOG_APP, "Reading rawfile: %{public}s (fileIndex=%{public}d)",
+                asyncData->fileName.c_str(), asyncData->fileIndex);
+
+    // 打开 RawFile
+    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, asyncData->fileName.c_str());
+    if (rawFile == nullptr) {
+        asyncData->success = false;
+        asyncData->errorMsg = "Failed to open rawfile: " + asyncData->fileName;
+        return;
+    }
+
+    // 获取文件大小
+    long fileSize = OH_ResourceManager_GetRawFileSize(rawFile);
+    if (fileSize <= 0) {
+        OH_ResourceManager_CloseRawFile(rawFile);
+        asyncData->success = false;
+        asyncData->errorMsg = "Invalid rawfile size";
+        return;
+    }
+
+    // 读取文件内容
+    asyncData->dngBuffer = malloc((size_t)fileSize);
+    asyncData->dngSize = (size_t)fileSize;
+    int bytesRead = OH_ResourceManager_ReadRawFile(rawFile, asyncData->dngBuffer, fileSize);
+    OH_ResourceManager_CloseRawFile(rawFile);
+
+    if (bytesRead != fileSize) {
+        asyncData->success = false;
+        asyncData->errorMsg = "Failed to read rawfile completely";
+        return;
+    }
+
+    OH_LOG_INFO(LOG_APP, "Read %{public}d bytes, starting dngToBGRA16...", bytesRead);
+
+    // ★ 耗时操作：DNG 解码
+    try {
+        std::unique_ptr<exposhot::ImageProcessor> processor = std::make_unique<exposhot::ImageProcessor>();
+        asyncData->bgra16Raw = processor->dngToBGRA16(asyncData->dngBuffer, asyncData->dngSize);
+
+        OH_LOG_INFO(LOG_APP, "dngToBGRA16 done: %{public}ux%{public}u",
+                    asyncData->bgra16Raw.width, asyncData->bgra16Raw.height);
+
+        // 运动分析和堆叠
+        asyncData->dx = {0.0f, 0.0f};
+        asyncData->dy = {0.0f, 0.0f};
+
+        if (asyncData->fileIndex != 0) {
+            uint16_t* stackedRes = nullptr; // TODO: 从 GPU 获取已堆叠结果
+            exposhot::MeanRes res = processor->MotionAnalysisAndStack(
+                stackedRes, asyncData->bgra16Raw.data,
+                asyncData->bgra16Raw.width, asyncData->bgra16Raw.height);
+            asyncData->dx[0] = res.mean_x[0];
+            asyncData->dx[1] = res.mean_x[1];
+            asyncData->dy[0] = res.mean_y[0];
+            asyncData->dy[1] = res.mean_y[1];
+        }
+
+        asyncData->success = true;
+        OH_LOG_INFO(LOG_APP, "MockStackExecute completed successfully");
+
+    } catch (const std::exception& e) {
+        asyncData->success = false;
+        asyncData->errorMsg = std::string("Processing error: ") + e.what();
+        OH_LOG_ERROR(LOG_APP, "MockStackExecute error: %{public}s", e.what());
+    }
+}
+
+// 主线程完成函数
+static void MockStackComplete(napi_env env, napi_status status, void* data) {
+    MockStackAsyncData* asyncData = (MockStackAsyncData*)data;
+
+    OH_LOG_INFO(LOG_APP, "MockStackComplete: success=%{public}d", asyncData->success);
+
+    napi_value resultObj;
+    napi_create_object(env, &resultObj);
+
+    if (status != napi_ok || !asyncData->success) {
+        // 失败情况
+        napi_value successValue;
+        napi_get_boolean(env, false, &successValue);
+        napi_set_named_property(env, resultObj, "success", successValue);
+
+        napi_value errorMsgValue;
+        napi_create_string_utf8(env, asyncData->errorMsg.c_str(), NAPI_AUTO_LENGTH, &errorMsgValue);
+        napi_set_named_property(env, resultObj, "error", errorMsgValue);
+
+        napi_reject_deferred(env, asyncData->deferred, resultObj);
+    } else {
+        // 成功情况
+        napi_value successValue;
+        napi_get_boolean(env, true, &successValue);
+        napi_set_named_property(env, resultObj, "success", successValue);
+
+        // nextFrameIndex
+        napi_value frameIndexValue;
+        napi_create_int32(env, asyncData->frameIndex + 1, &frameIndexValue);
+        napi_set_named_property(env, resultObj, "nextFrameIndex", frameIndexValue);
+
+        // message
+        napi_value messageValue;
+        std::string msg = "Frame " + std::to_string(asyncData->frameIndex) +
+                          " (" + asyncData->fileName + ") processed";
+        napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &messageValue);
+        napi_set_named_property(env, resultObj, "message", messageValue);
+
+        // fileName
+        napi_value fileNameValue;
+        napi_create_string_utf8(env, asyncData->fileName.c_str(), NAPI_AUTO_LENGTH, &fileNameValue);
+        napi_set_named_property(env, resultObj, "fileName", fileNameValue);
+
+        // fileSize
+        napi_value fileSizeValue;
+        napi_create_int32(env, static_cast<int32_t>(asyncData->dngSize), &fileSizeValue);
+        napi_set_named_property(env, resultObj, "fileSize", fileSizeValue);
+
+        // width, height
+        napi_value widthValue, heightValue;
+        napi_create_int32(env, asyncData->bgra16Raw.width, &widthValue);
+        napi_create_int32(env, asyncData->bgra16Raw.height, &heightValue);
+        napi_set_named_property(env, resultObj, "width", widthValue);
+        napi_set_named_property(env, resultObj, "height", heightValue);
+
+        // dx, dy 偏移量
+        napi_value dxArr, dyArr;
+        napi_create_array_with_length(env, 2, &dxArr);
+        napi_create_array_with_length(env, 2, &dyArr);
+        for (int i = 0; i < 2; i++) {
+            napi_value dxVal, dyVal;
+            napi_create_double(env, asyncData->dx[i], &dxVal);
+            napi_create_double(env, asyncData->dy[i], &dyVal);
+            napi_set_element(env, dxArr, i, dxVal);
+            napi_set_element(env, dyArr, i, dyVal);
+        }
+        napi_set_named_property(env, resultObj, "dx", dxArr);
+        napi_set_named_property(env, resultObj, "dy", dyArr);
+
+        // buffer (原始 DNG 数据)
+        if (asyncData->dngBuffer && asyncData->dngSize > 0) {
+            void* outputData = nullptr;
+            napi_value arrayBuffer;
+            napi_status bufStatus = napi_create_arraybuffer(env, asyncData->dngSize, &outputData, &arrayBuffer);
+            if (bufStatus == napi_ok && outputData != nullptr) {
+                std::memcpy(outputData, asyncData->dngBuffer, asyncData->dngSize);
+                napi_set_named_property(env, resultObj, "buffer", arrayBuffer);
+            }
+        }
+
+        napi_resolve_deferred(env, asyncData->deferred, resultObj);
+    }
+
+    // 清理
+    if (asyncData->dngBuffer) {
+        free(asyncData->dngBuffer);
+    }
+    // 注意：bgra16Raw.data 由 Frame 管理，无需手动释放
+    napi_delete_async_work(env, asyncData->asyncWork);
+    delete asyncData;
+}
+
+// 模拟堆叠过程（异步版本，返回 Promise）
 static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value args[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
-    // 解析参数
-    std::string surfaceId;
+    // 解析 frameIndex
     int32_t frameIndex = 0;
-
-    if (argc >= 1) {
-        size_t surfaceIdLen = 0;
-        napi_get_value_string_utf8(env, args[0], nullptr, 0, &surfaceIdLen);
-        surfaceId.resize(surfaceIdLen);
-        napi_get_value_string_utf8(env, args[0], &surfaceId[0], surfaceIdLen + 1, &surfaceIdLen);
-    }
-
-    if (argc >= 2) {
+    if (argc >= 2 && args[1] != nullptr) {
         napi_get_value_int32(env, args[1], &frameIndex);
     }
 
-    OH_LOG_INFO(LOG_APP, "MockStackProcess called: surfaceId=%{public}s, frameIndex=%{public}d",
-                surfaceId.c_str(), frameIndex);
+    OH_LOG_INFO(LOG_APP, "MockStackProcess called: frameIndex=%{public}d (main thread)", frameIndex);
 
-    // 读取本地 RAWFILE 文件到内存
-    // 定义测试用的 DNG 文件列表
-    static const char* RAW_FILE_LIST[] = {
-        "IMG_20260314_010259.dng",
-        "IMG_20260314_010348.dng",
-        "IMG_20260314_010521.dng",
-        "IMG_20260314_010555.dng"
-    };
-    static const int RAW_FILE_COUNT = 4;
+    // 创建 Promise
+    napi_value promise;
+    napi_deferred deferred;
+    napi_create_promise(env, &deferred, &promise);
 
-    // 使用全局 ResourceManager
+    // 快速检查 ResourceManager
     if (g_resourceManager == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "ResourceManager not initialized, call initCamera with resourceManager first");
-
         napi_value resultObj;
         napi_create_object(env, &resultObj);
         napi_value successValue;
         napi_get_boolean(env, false, &successValue);
         napi_set_named_property(env, resultObj, "success", successValue);
-        return resultObj;
+        napi_value errorMsgValue;
+        napi_create_string_utf8(env, "ResourceManager not initialized", NAPI_AUTO_LENGTH, &errorMsgValue);
+        napi_set_named_property(env, resultObj, "error", errorMsgValue);
+        napi_reject_deferred(env, deferred, resultObj);
+        return promise;
     }
 
-    // 根据 frameIndex 选择要读取的文件
-    int fileIndex = frameIndex % RAW_FILE_COUNT;
-    const char* fileName = RAW_FILE_LIST[fileIndex];
+    // 创建异步工作数据
+    MockStackAsyncData* asyncData = new MockStackAsyncData();
+    asyncData->deferred = deferred;
+    asyncData->frameIndex = frameIndex;
+    asyncData->dngBuffer = nullptr;
+    asyncData->dngSize = 0;
+    asyncData->success = false;
 
-    OH_LOG_INFO(LOG_APP, "Reading rawfile: %{public}s (frameIndex=%{public}d, fileIndex=%{public}d)",
-                fileName, frameIndex, fileIndex);
+    // 创建异步工作
+    napi_value workName;
+    napi_create_string_utf8(env, "MockStackProcess", NAPI_AUTO_LENGTH, &workName);
+    napi_create_async_work(env, nullptr, workName, MockStackExecute, MockStackComplete,
+                           asyncData, &asyncData->asyncWork);
 
-    // 打开 RawFile（使用全局 ResourceManager）
-    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, fileName);
-    if (rawFile == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "Failed to open rawfile: %{public}s", fileName);
+    // 加入队列
+    napi_queue_async_work(env, asyncData->asyncWork);
 
-        napi_value resultObj;
-        napi_create_object(env, &resultObj);
-        napi_value successValue;
-        napi_get_boolean(env, false, &successValue);
-        napi_set_named_property(env, resultObj, "success", successValue);
-        return resultObj;
-    }
-
-    // 获取文件大小
-    long fileSize = OH_ResourceManager_GetRawFileSize(rawFile);
-    OH_LOG_INFO(LOG_APP, "Rawfile size: %{public}ld bytes", fileSize);
-
-    if (fileSize <= 0) {
-        OH_LOG_ERROR(LOG_APP, "Invalid rawfile size: %{public}ld", fileSize);
-        OH_ResourceManager_CloseRawFile(rawFile);
-
-        napi_value resultObj;
-        napi_create_object(env, &resultObj);
-        napi_value successValue;
-        napi_get_boolean(env, false, &successValue);
-        napi_set_named_property(env, resultObj, "success", successValue);
-        return resultObj;
-    }
-
-    // 分配内存并读取文件内容
-    void* bufferCopy = malloc((size_t) fileSize);
-    int bytesRead = OH_ResourceManager_ReadRawFile(rawFile, bufferCopy, fileSize);
-
-    OH_LOG_INFO(LOG_APP, "Read %{public}d bytes from rawfile", bytesRead);
-    std::unique_ptr<exposhot::ImageProcessor> processor = std::make_unique<exposhot::ImageProcessor>();
-    
-    exposhot::Bgra16Raw bgra16Raw = processor->dngToBGRA16(bufferCopy, fileSize);
-    
-    std::vector<float> dx {0.0f, 0.0f};
-    std::vector<float> dy {0.0f, 0.0f};
-    
-    // NOTE 从GPU获取已堆叠的结果
-    uint16_t* stackedRes;
-    if (fileIndex != 0) {
-        exposhot::MeanRes res = processor->MotionAnalysisAndStack(stackedRes, bgra16Raw.data, bgra16Raw.width, bgra16Raw.height);
-        dx[0] = res.mean_x[0];
-        dx[1] = res.mean_x[1];
-        dy[0] = res.mean_y[0];
-        dy[1] = res.mean_y[1];
-    }
-    // NOTE 实际处理区域 开始  当前图像信息都在bgra16Raw中偏移量为dx和dy
-
-    // NOTE 实际处理区域 结束
-
-    // 关闭文件（ResourceManager 是全局的，不需要释放）
-    OH_ResourceManager_CloseRawFile(rawFile);
-
-    // 创建返回结果对象
-    napi_value resultObj;
-    napi_create_object(env, &resultObj);
-
-    // 设置 success
-    napi_value successValue;
-    napi_get_boolean(env, true, &successValue);
-    napi_set_named_property(env, resultObj, "success", successValue);
-
-    // 设置 nextFrameIndex
-    napi_value frameIndexValue;
-    napi_create_int32(env, frameIndex + 1, &frameIndexValue);
-    napi_set_named_property(env, resultObj, "nextFrameIndex", frameIndexValue);
-
-    // 设置 message
-    napi_value messageValue;
-    std::string msg = "Frame " + std::to_string(frameIndex) + " (" + fileName + ") processed, " +
-                      std::to_string(bytesRead) + " bytes read";
-    napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &messageValue);
-    napi_set_named_property(env, resultObj, "message", messageValue);
-
-    // 设置 fileName
-    napi_value fileNameValue;
-    napi_create_string_utf8(env, fileName, NAPI_AUTO_LENGTH, &fileNameValue);
-    napi_set_named_property(env, resultObj, "fileName", fileNameValue);
-
-    // 设置 fileSize
-    napi_value fileSizeValue;
-    napi_create_int32(env, static_cast<int32_t>(fileSize), &fileSizeValue);
-    napi_set_named_property(env, resultObj, "fileSize", fileSizeValue);
-
-    // 创建并设置 buffer (ArrayBuffer)
-    if (bytesRead > 0) {
-        void* outputData = nullptr;
-        napi_value arrayBuffer = nullptr;
-        napi_status status = napi_create_arraybuffer(env, bytesRead, &outputData, &arrayBuffer);
-
-        if (status == napi_ok && outputData != nullptr) {
-            std::memcpy(outputData, bufferCopy, bytesRead);
-            napi_set_named_property(env, resultObj, "buffer", arrayBuffer);
-
-            OH_LOG_INFO(LOG_APP, "Created ArrayBuffer with %{public}d bytes", bytesRead);
-        } else {
-            OH_LOG_ERROR(LOG_APP, "Failed to create ArrayBuffer");
-        }
-    }
-
-    return resultObj;
+    OH_LOG_INFO(LOG_APP, "MockStackProcess: async work queued, returning Promise");
+    return promise;
 }
 
 EXTERN_C_START
