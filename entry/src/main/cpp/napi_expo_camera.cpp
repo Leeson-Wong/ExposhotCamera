@@ -4,6 +4,8 @@
 #include <map>
 #include "expo_camera.h"
 #include "capture_manager.h"
+#include "camera_command_queue.h"
+#include "owned_buffer.h"
 #include "file_saver.h"
 #include "hilog/log.h"
 #include "image_processor.h"
@@ -18,8 +20,7 @@
 
 struct PhotoCallbackData {
     std::string sessionId;
-    void* buffer;
-    size_t size;
+    exposhot::OwnedBuffer buffer;
     uint32_t width;
     uint32_t height;
 };
@@ -41,8 +42,7 @@ struct StateCallbackData {
 
 struct BurstImageCallbackData {
     std::string sessionId;
-    void* buffer;
-    size_t size;
+    exposhot::OwnedBuffer buffer;
     bool isFinal;
 };
 
@@ -93,9 +93,6 @@ static napi_threadsafe_function g_burstProgressTsfn = nullptr;
 static napi_threadsafe_function g_burstImageTsfn = nullptr;
 static std::mutex g_burstMutex;
 
-// Global ResourceManager（用于访问 rawfile）
-static NativeResourceManager* g_resourceManager = nullptr;
-
 // 当前 sessionId 存储（用于异步回调）
 static std::string g_currentSessionId;
 
@@ -106,13 +103,15 @@ static void PhotoCallJs(napi_env env, napi_value js_cb, void* context, void* dat
     PhotoCallbackData* cbd = static_cast<PhotoCallbackData*>(data);
     if (!cbd) return;
 
+    size_t bufSize = cbd->buffer.size();
     OH_LOG_INFO(LOG_APP, "PhotoCallJs sessionId:%{public}s, size:%{public}zu, %{public}ux%{public}u",
-                cbd->sessionId.c_str(), cbd->size, cbd->width, cbd->height);
+                cbd->sessionId.c_str(), bufSize, cbd->width, cbd->height);
 
     void* outputData = nullptr;
     napi_value arrayBuffer = nullptr;
-    napi_create_arraybuffer(env, cbd->size, &outputData, &arrayBuffer);
-    std::memcpy(outputData, cbd->buffer, cbd->size);
+    napi_create_arraybuffer(env, bufSize, &outputData, &arrayBuffer);
+    std::memcpy(outputData, cbd->buffer.data(), bufSize);
+    // OwnedBuffer 在 cbd 析构时自动释放
 
     napi_value imageDataObj;
     napi_create_object(env, &imageDataObj);
@@ -142,9 +141,6 @@ static void PhotoCallJs(napi_env env, napi_value js_cb, void* context, void* dat
         OH_LOG_ERROR(LOG_APP, "PhotoCallJs: napi_call_function failed, status=%{public}d", status);
     }
 
-    if (cbd->buffer) {
-        free(cbd->buffer);
-    }
     delete cbd;
 }
 
@@ -278,13 +274,15 @@ static void BurstImageCallJs(napi_env env, napi_value js_cb, void* context, void
     BurstImageCallbackData* cbd = static_cast<BurstImageCallbackData*>(data);
     if (!cbd) return;
 
+    size_t bufSize = cbd->buffer.size();
     OH_LOG_INFO(LOG_APP, "BurstImageCallJs sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
-                cbd->sessionId.c_str(), cbd->size, cbd->isFinal);
+                cbd->sessionId.c_str(), bufSize, cbd->isFinal);
 
     void* outputData = nullptr;
     napi_value arrayBuffer = nullptr;
-    napi_create_arraybuffer(env, cbd->size, &outputData, &arrayBuffer);
-    std::memcpy(outputData, cbd->buffer, cbd->size);
+    napi_create_arraybuffer(env, bufSize, &outputData, &arrayBuffer);
+    std::memcpy(outputData, cbd->buffer.data(), bufSize);
+    // OwnedBuffer 在 cbd 析构时自动释放
 
     napi_value isFinalValue;
     napi_get_boolean(env, cbd->isFinal, &isFinalValue);
@@ -300,7 +298,6 @@ static void BurstImageCallJs(napi_env env, napi_value js_cb, void* context, void
         OH_LOG_ERROR(LOG_APP, "BurstImageCallJs: napi_call_function failed, status=%{public}d", status);
     }
 
-    free(cbd->buffer);
     delete cbd;
 }
 
@@ -352,23 +349,21 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
     std::lock_guard<std::mutex> lock(g_photoMutex);
     if (!g_photoTsfn) {
         OH_LOG_ERROR(LOG_APP, "Photo callback not registered");
+        // 释放 buffer（所有权已转移给我们）
+        free(buffer);
         return;
     }
 
     OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu, %{public}ux%{public}u",
                 sessionId.c_str(), size, width, height);
 
-    void* copyBuffer = malloc(size);
-    if (copyBuffer == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for photo buffer");
-        return;
-    }
-    std::memcpy(copyBuffer, buffer, size);
-
-    // 释放上层（ExpoCamera::onPhotoAvailable）传入的原始缓冲区
-    free(buffer);
-
-    PhotoCallbackData* cbd = new PhotoCallbackData{sessionId, copyBuffer, size, width, height};
+    // 接管 buffer 所有权，直接 move 到 tsfn 数据（消除一次 malloc+memcpy）
+    PhotoCallbackData* cbd = new PhotoCallbackData{
+        sessionId,
+        exposhot::OwnedBuffer::takeOver(buffer, size),
+        width,
+        height
+    };
     napi_call_threadsafe_function(g_photoTsfn, cbd, napi_tsfn_nonblocking);
 }
 
@@ -424,9 +419,9 @@ static void onStateChanged(const std::string& state, const std::string& message)
 }
 
 static napi_value InitCamera(napi_env env, napi_callback_info info) {
-    // 参数：mode (必填), resourceManager (可选)
-    size_t argc = 2;
-    napi_value args[2] = {nullptr, nullptr};
+    // 参数：mode (必填)
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     // 解析 mode 参数（第一个参数，必填）
@@ -434,23 +429,6 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
     if (argc >= 1 && args[0] != nullptr) {
         napi_get_value_int32(env, args[0], &modeValue);
         OH_LOG_INFO(LOG_APP, "InitCamera with mode: %{public}d", modeValue);
-    }
-
-    // 初始化 ResourceManager（第二个参数，可选）
-    if (argc >= 2 && args[1] != nullptr) {
-        // 释放之前可能存在的 ResourceManager
-        if (g_resourceManager != nullptr) {
-            OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
-            g_resourceManager = nullptr;
-        }
-        g_resourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[1]);
-        if (g_resourceManager != nullptr) {
-            OH_LOG_INFO(LOG_APP, "ResourceManager initialized successfully");
-        } else {
-            OH_LOG_ERROR(LOG_APP, "Failed to initialize ResourceManager");
-        }
-    } else {
-        OH_LOG_WARN(LOG_APP, "InitCamera called without ResourceManager argument");
     }
 
     // 通过 CaptureManager 初始化（内部会初始化 ExpoCamera 并注册回调）
@@ -466,13 +444,6 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
 }
 
 static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
-    // 释放全局 ResourceManager
-    if (g_resourceManager != nullptr) {
-        OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
-        g_resourceManager = nullptr;
-        OH_LOG_INFO(LOG_APP, "ResourceManager released");
-    }
-
     // 通过 CaptureManager 释放（内部会释放 ExpoCamera）
     exposhot::CaptureManager::getInstance().release();
 
@@ -499,11 +470,12 @@ static napi_value SwitchSurface(napi_env env, napi_callback_info info) {
     std::string surfaceId(surfaceIdLen, '\0');
     napi_get_value_string_utf8(env, args[0], &surfaceId[0], surfaceIdLen + 1, &surfaceIdLen);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.switchSurface(surfaceId);
+    // 通过命令队列切换 Surface（串行化 OH_Camera_* 调用）
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeSwitchSurface(surfaceId));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -525,20 +497,22 @@ static napi_value StartPreview(napi_env env, napi_callback_info info) {
     std::string surfaceId(surfaceIdLen, '\0');
     napi_get_value_string_utf8(env, args[0], &surfaceId[0], surfaceIdLen + 1, &surfaceIdLen);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.startPreview(surfaceId);
+    // 通过命令队列启动预览
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeStartPreview(surfaceId));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
 static napi_value StopPreview(napi_env env, napi_callback_info info) {
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.stopPreview();
+    // 通过命令队列停止预览
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeStopPreview());
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -557,11 +531,12 @@ static napi_value SetZoomRatio(napi_env env, napi_callback_info info) {
     double ratio;
     napi_get_value_double(env, args[0], &ratio);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.setZoomRatio(static_cast<float>(ratio));
+    // 通过命令队列设置缩放
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeSetZoomRatio(static_cast<float>(ratio)));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -591,11 +566,12 @@ static napi_value SetFocusMode(napi_env env, napi_callback_info info) {
     int32_t mode;
     napi_get_value_int32(env, args[0], &mode);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.setFocusMode(static_cast<Camera_FocusMode>(mode));
+    // 通过命令队列设置对焦模式
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeSetFocusMode(mode));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -625,11 +601,12 @@ static napi_value SetFocusDistance(napi_env env, napi_callback_info info) {
     double distance;
     napi_get_value_double(env, args[0], &distance);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.setFocusDistance(static_cast<float>(distance));
+    // 通过命令队列设置对焦距离
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeSetFocusDistance(static_cast<float>(distance)));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -679,11 +656,12 @@ static napi_value SetFocusPoint(napi_env env, napi_callback_info info) {
     napi_get_value_double(env, args[0], &x);
     napi_get_value_double(env, args[1], &y);
 
-    ExpoCamera& camera = ExpoCamera::getInstance();
-    Camera_ErrorCode err = camera.setFocusPoint(static_cast<float>(x), static_cast<float>(y));
+    // 通过命令队列设置对焦点
+    int32_t err = exposhot::CaptureManager::getInstance().getCommandQueue()->postSync(
+        exposhot::CameraCommand::makeSetFocusPoint(static_cast<float>(x), static_cast<float>(y)));
 
     napi_value result;
-    napi_create_int32(env, static_cast<int32_t>(err), &result);
+    napi_create_int32(env, err, &result);
     return result;
 }
 
@@ -1254,20 +1232,20 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
     std::lock_guard<std::mutex> lock(g_burstMutex);
     if (!g_burstImageTsfn) {
         OH_LOG_ERROR(LOG_APP, "Burst image callback not ready");
+        // 释放 buffer（所有权已转移给我们）
+        free(buffer);
         return;
     }
 
     OH_LOG_INFO(LOG_APP, "onBurstImageCallback sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
                 sessionId.c_str(), size, isFinal);
 
-    void* copyBuffer = malloc(size);
-    if (copyBuffer == nullptr) {
-        OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for burst image buffer");
-        return;
-    }
-    std::memcpy(copyBuffer, buffer, size);
-
-    BurstImageCallbackData* cbd = new BurstImageCallbackData{sessionId, copyBuffer, size, isFinal};
+    // 接管 buffer 所有权，直接 move 到 tsfn 数据（消除一次 malloc+memcpy）
+    BurstImageCallbackData* cbd = new BurstImageCallbackData{
+        sessionId,
+        exposhot::OwnedBuffer::takeOver(buffer, size),
+        isFinal
+    };
     napi_call_threadsafe_function(g_burstImageTsfn, cbd, napi_tsfn_nonblocking);
 }
 
@@ -1460,11 +1438,11 @@ static void MockStackExecute(napi_env env, void* data) {
     OH_LOG_INFO(LOG_APP, "MockStackExecute: frameIndex=%{public}d (worker thread)", asyncData->frameIndex);
 
     // 检查 ResourceManager
-    if (g_resourceManager == nullptr) {
-        asyncData->success = false;
-        asyncData->errorMsg = "ResourceManager not initialized";
-        return;
-    }
+//    if (g_resourceManager == nullptr) {
+//        asyncData->success = false;
+//        asyncData->errorMsg = "ResourceManager not initialized";
+//        return;
+//    }
 
     // 选择文件
     asyncData->fileIndex = asyncData->frameIndex % RAW_FILE_COUNT;
@@ -1474,7 +1452,8 @@ static void MockStackExecute(napi_env env, void* data) {
                 asyncData->fileName.c_str(), asyncData->fileIndex);
 
     // 打开 RawFile
-    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, asyncData->fileName.c_str());
+//    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, asyncData->fileName.c_str());
+    RawFile* rawFile = nullptr;
     if (rawFile == nullptr) {
         asyncData->success = false;
         asyncData->errorMsg = "Failed to open rawfile: " + asyncData->fileName;
@@ -1649,18 +1628,18 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     napi_create_promise(env, &deferred, &promise);
 
     // 快速检查 ResourceManager
-    if (g_resourceManager == nullptr) {
-        napi_value resultObj;
-        napi_create_object(env, &resultObj);
-        napi_value successValue;
-        napi_get_boolean(env, false, &successValue);
-        napi_set_named_property(env, resultObj, "success", successValue);
-        napi_value errorMsgValue;
-        napi_create_string_utf8(env, "ResourceManager not initialized", NAPI_AUTO_LENGTH, &errorMsgValue);
-        napi_set_named_property(env, resultObj, "error", errorMsgValue);
-        napi_reject_deferred(env, deferred, resultObj);
-        return promise;
-    }
+//    if (g_resourceManager == nullptr) {
+//        napi_value resultObj;
+//        napi_create_object(env, &resultObj);
+//        napi_value successValue;
+//        napi_get_boolean(env, false, &successValue);
+//        napi_set_named_property(env, resultObj, "success", successValue);
+//        napi_value errorMsgValue;
+//        napi_create_string_utf8(env, "ResourceManager not initialized", NAPI_AUTO_LENGTH, &errorMsgValue);
+//        napi_set_named_property(env, resultObj, "error", errorMsgValue);
+//        napi_reject_deferred(env, deferred, resultObj);
+//        return promise;
+//    }
 
     // 创建异步工作数据
     MockStackAsyncData* asyncData = new MockStackAsyncData();

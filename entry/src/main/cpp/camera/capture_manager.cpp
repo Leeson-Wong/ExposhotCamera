@@ -47,6 +47,7 @@ CaptureManager& CaptureManager::getInstance() {
 
 CaptureManager::CaptureManager()
     : taskQueue_(std::make_unique<TaskQueue>())
+    , commandQueue_(std::make_unique<CameraCommandQueue>())
     , processor_(std::make_unique<ImageProcessor>()) {
 }
 
@@ -76,6 +77,9 @@ bool CaptureManager::init(CaptureMode mode) {
     }
     processor_->reset();
 
+    // 停止并等待命令队列
+    commandQueue_->stop();
+
     // 清理 ExpoCamera 回调
     ExpoCamera::getInstance().setPhotoCapturedCallback(nullptr);
     ExpoCamera::getInstance().setPhotoErrorCallback(nullptr);
@@ -89,11 +93,14 @@ bool CaptureManager::init(CaptureMode mode) {
     // 保存当前模式
     currentMode_ = mode;
 
-    // 初始化下层 ExpoCamera（依赖方向：CaptureManager → ExpoCamera）
-    // 传入模式，让 ExpoCamera 选择正确的摄像头
-    Camera_ErrorCode err = ExpoCamera::getInstance().init(mode);
-    if (err != CAMERA_OK) {
-        CM_LOG_ERROR("[INIT_FAILED] ExpoCamera init failed: %{public}d", err);
+    // 启动命令队列（在 ExpoCamera::init 之前）
+    commandQueue_->start();
+
+    // 通过命令队列初始化 ExpoCamera（串行化 OH_Camera_* 调用）
+    int32_t initResult = commandQueue_->postSync(CameraCommand::makeInit(mode));
+    if (initResult != 0) {
+        CM_LOG_ERROR("[INIT_FAILED] ExpoCamera init failed: %{public}d", initResult);
+        commandQueue_->stop();
         return false;
     }
 
@@ -101,6 +108,7 @@ bool CaptureManager::init(CaptureMode mode) {
     FileSaver::getInstance().init();
 
     // 注册照片回调到 ExpoCamera
+    // 注意：此回调在 CameraCommand 线程执行，不再在相机回调线程执行
     ExpoCamera::getInstance().setPhotoCapturedCallback(
         [this](void* buffer, size_t size, uint32_t width, uint32_t height) {
             // 根据当前模式分发到对应处理方法
@@ -132,6 +140,13 @@ void CaptureManager::release() {
                 static_cast<int>(state_.load()), taskQueue_->isRunning());
 
     cancelBurst();
+
+    // 停止连拍循环线程并等待其结束
+    captureLoopRunning_.store(false);
+    if (captureLoopThread_.joinable()) {
+        captureLoopThread_.join();
+    }
+
     taskQueue_->stop();
     processor_->reset();
 
@@ -139,8 +154,8 @@ void CaptureManager::release() {
     ExpoCamera::getInstance().setPhotoCapturedCallback(nullptr);
     ExpoCamera::getInstance().setPhotoErrorCallback(nullptr);
 
-    // 释放下层 ExpoCamera
-    ExpoCamera::getInstance().release();
+    // 通过命令队列释放 ExpoCamera
+    commandQueue_->stop();
 
     // 重置状态，允许再次初始化
     state_.store(CaptureState::IDLE);
@@ -217,23 +232,14 @@ int32_t CaptureManager::captureSingle(std::string& outSessionId) {
 
     OH_LOG_INFO(LOG_APP, "Single capture started: sessionId=%{public}s", sessionId.c_str());
 
-    // 获取 PhotoOutput 并触发拍照
-    Camera_PhotoOutput* photoOutput = getPhotoOutput();
-    if (!photoOutput) {
-        OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
+    // 通过命令队列触发拍照
+    int32_t captureResult = commandQueue_->postSync(CameraCommand::makeCaptureSingle());
+    if (captureResult != 0) {
         state_.store(CaptureState::IDLE);
-        // 通知拍照失败事件
-        notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "PhotoOutput is null"});
-        return -ENODEV;  // 系统标准错误码：设备不存在
-    }
-
-    Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput);
-    if (err != CAMERA_OK) {
-        state_.store(CaptureState::IDLE);
-        OH_LOG_ERROR(LOG_APP, "Failed to trigger photo capture: %{public}d", err);
+        OH_LOG_ERROR(LOG_APP, "Failed to trigger photo capture: %{public}d", captureResult);
         // 通知拍照失败事件
         notifyPhotoEvent(photoEventCallback_, {PhotoEventType::CAPTURE_FAILED, sessionId, -1, "Failed to trigger photo capture"});
-        return static_cast<int32_t>(err);  // 返回 HarmonyOS 相机错误码
+        return captureResult;
     }
 
     outSessionId = sessionId;
@@ -260,6 +266,8 @@ void CaptureManager::onSinglePhotoCaptured(void* buffer, size_t size, uint32_t w
         if (currentState != CaptureState::SINGLE_CAPTURING) {
             CM_LOG_WARN("[SINGLE_CAPTURE_FAILED] Not in SINGLE_CAPTURING state, current: %{public}d",
                         static_cast<int>(currentState));
+            // 释放 buffer（所有权转移给我们，但不处理）
+            free(buffer);
             return;
         }
 
@@ -401,11 +409,12 @@ int32_t CaptureManager::startBurst(const BurstConfig& config, std::string& outSe
     OH_LOG_INFO(LOG_APP, "Burst started: sessionId=%{public}s, %{public}d frames, exposure: %{public}dms",
                 sessionId.c_str(), config.frameCount, config.exposureMs);
 
-    // 启动拍照循环(在独立线程中)
-    std::thread captureThread([this]() {
+    // 启动拍照循环(在可 join 的独立线程中)
+    captureLoopRunning_.store(true);
+    captureLoopThread_ = std::thread([this]() {
         startCaptureLoop();
+        captureLoopRunning_.store(false);
     });
-    captureThread.detach();
 
     outSessionId = sessionId;
     return 0;  // 成功
@@ -458,12 +467,14 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
 
         if (currentState == CaptureState::CANCELLED) {
             CM_LOG_INFO("[BURST_CAPTURE_IGNORED] Burst cancelled, ignoring captured photo");
+            free(buffer);
             return;
         }
 
         if (currentState != CaptureState::BURST_CAPTURING) {
             CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Not in BURST_CAPTURING state, currentState=%{public}d",
                         static_cast<int>(currentState));
+            free(buffer);
             return;
         }
 
@@ -472,31 +483,23 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
         if (frameIndex >= config_.frameCount) {
             CM_LOG_WARN("[BURST_CAPTURE_IGNORED] Already captured enough frames, frameIndex=%{public}d >= frameCount=%{public}d",
                         frameIndex, config_.frameCount);
+            free(buffer);
             return;
         }
 
         CM_LOG_INFO("[BURST_CAPTURE] frame=%{public}d/%{public}d, size=%{public}zu, %{public}ux%{public}u",
                     frameIndex + 1, config_.frameCount, size, width, height);
 
-        // 复制 buffer
-        void* copyBuffer = malloc(size);
-        if (!copyBuffer) {
-            CM_LOG_ERROR("[BURST_CAPTURE_ALLOC_FAILED] Failed to allocate buffer for frame %{public}d", frameIndex);
-            return;
-        }
-        memcpy(copyBuffer, buffer, size);
-
-        // 释放上层（ExpoCamera::onPhotoAvailable）传入的原始缓冲区
-        free(buffer);
-
-        // 创建任务并入队
+        // 接管 buffer 所有权（从 PHOTO_AVAILABLE 命令传递过来）
+        // 直接 move 到 ImageTask，无需额外复制
         ImageTask task;
         task.taskId = frameIndex;
-        task.buffer = copyBuffer;
-        task.size = size;
+        task.buffer = OwnedBuffer::takeOver(buffer, size);
         task.width = width;
         task.height = height;
         task.isFirst = (frameIndex == 0);
+        // buffer 所有权已转移，置空防止后续 free
+        buffer = nullptr;
 
         taskQueue_->enqueue(std::move(task));
 
@@ -573,19 +576,8 @@ void CaptureManager::startCaptureLoop() {
 }
 
 void CaptureManager::captureNextFrame() {
-    // 获取 PhotoOutput 并触发拍照
-    Camera_PhotoOutput* photoOutput = getPhotoOutput();
-    if (!photoOutput) {
-        OH_LOG_ERROR(LOG_APP, "PhotoOutput is null");
-        return;
-    }
-
-    Camera_ErrorCode err = OH_PhotoOutput_Capture(photoOutput);
-    if (err != CAMERA_OK) {
-        OH_LOG_ERROR(LOG_APP, "Failed to capture photo: %{public}d", err);
-    } else {
-        OH_LOG_INFO(LOG_APP, "Photo capture triggered");
-    }
+    // 通过命令队列触发拍照（OH_PhotoOutput_Capture 在 CameraCommand 线程上执行）
+    commandQueue_->post(CameraCommand::makeCaptureBurstFrame());
 }
 
 void CaptureManager::processTask(ImageTask&& task) {
@@ -597,7 +589,7 @@ void CaptureManager::processTask(ImageTask&& task) {
     }
 
     CM_LOG_INFO("[PROCESS_TASK_BEGIN] taskId=%{public}d, size=%{public}zu, %{public}dx%{public}d, state=%{public}d",
-                task.taskId, task.size, task.width, task.height, static_cast<int>(currentState));
+                task.taskId, task.buffer.size(), task.width, task.height, static_cast<int>(currentState));
 
     // 第一帧: 初始化处理会话
     if (task.isFirst) {
@@ -629,7 +621,7 @@ void CaptureManager::processTask(ImageTask&& task) {
 
     // 处理帧（原始图像数据，由 processor 内部解码）
     // 假设相机输出为 JPEG 格式
-    if (!processor_->processFrame(task.taskId, task.buffer, task.size,
+    if (!processor_->processFrame(task.taskId, task.buffer.data(), task.buffer.size(),
                                    task.width, task.height, ImageFormat::JPEG, task.isFirst)) {
         CM_LOG_ERROR("[PROCESS_TASK_FRAME_FAILED] Failed to process frame %{public}d", task.taskId);
     }
@@ -773,9 +765,9 @@ int32_t CaptureManager::switchCaptureMode(CaptureMode mode) {
     CM_LOG_INFO("[SWITCH_MODE_BEGIN] Switching mode: %{public}d -> %{public}d",
                 static_cast<int>(currentMode_), static_cast<int>(mode));
 
-    // 调用 ExpoCamera 切换模式
-    Camera_ErrorCode err = ExpoCamera::getInstance().switchCaptureMode(mode);
-    if (err != CAMERA_OK) {
+    // 通过命令队列切换模式
+    int32_t err = commandQueue_->postSync(CameraCommand::makeSwitchCaptureMode(mode));
+    if (err != 0) {
         CM_LOG_ERROR("[SWITCH_MODE_FAILED] ExpoCamera switchCaptureMode failed: %{public}d", err);
         return static_cast<int32_t>(err);
     }

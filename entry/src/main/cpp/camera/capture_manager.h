@@ -7,6 +7,7 @@
 #include <functional>
 #include "task_queue.h"
 #include "image_processor.h"
+#include "camera_command_queue.h"
 #include "expo_camera.h"  // 使用全局 CaptureMode
 #include "ohcamera/photo_output.h"
 
@@ -174,6 +175,9 @@ public:
     // 获取 PhotoOutput（用于触发拍照）
     Camera_PhotoOutput* getPhotoOutput() const;
 
+    // 获取命令队列（供 ExpoCamera 回调投递命令）
+    CameraCommandQueue* getCommandQueue() const { return commandQueue_.get(); }
+
     // 切换拍摄模式（统一入口，同步更新 currentMode_ 和 ExpoCamera）
     int32_t switchCaptureMode(CaptureMode mode);
 
@@ -217,6 +221,9 @@ private:
     // 任务队列
     std::unique_ptr<TaskQueue> taskQueue_;
 
+    // 相机命令队列（所有 OH_Camera_* API 调用串行化）
+    std::unique_ptr<CameraCommandQueue> commandQueue_;
+
     // 图像处理器
     std::unique_ptr<ImageProcessor> processor_;
 
@@ -227,6 +234,10 @@ private:
     PhotoErrorCallback photoErrorCallback_;
     PhotoEventCallback photoEventCallback_;
     ProcessEventCallback processEventCallback_;
+
+    // 连拍循环线程（可 join，替代 detach）
+    std::thread captureLoopThread_;
+    std::atomic<bool> captureLoopRunning_{false};
 
     // 线程锁
     mutable std::mutex mutex_;

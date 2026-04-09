@@ -186,6 +186,10 @@ private:
     // 照片回调（由 CaptureManager 等上层注册）
     PhotoCapturedCallback photoCapturedCallback_;
     PhotoErrorCallback photoErrorCallback_;
+
+    // 回调有效性标记（原子操作，避免竞态）
+    std::atomic<bool> photoCallbackValid_{false};
+    std::atomic<bool> photoErrorCallbackValid_{false};
 };
 
 #endif // EXPO_CAMERA_H

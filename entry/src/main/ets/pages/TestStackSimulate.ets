@@ -49,7 +49,7 @@ struct TestStackSimulate {
         const resMgr = getContext(this).resourceManager;
 
         // 初始化相机（传入 resourceManager 用于访问 rawfile）
-        const result = nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE, resMgr);
+        const result = nativeCamera.initCamera(nativeCamera.CaptureMode.SINGLE);
         if (result === 0) {
             this.cameraInitialized = true;
             this.cameraStatus = '相机已初始化';

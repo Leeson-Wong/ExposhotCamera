@@ -26,6 +26,7 @@ add_library(expocamera SHARED ${SOURCES}
     camera/image_processor.cpp
     camera/capture_manager.cpp
     camera/file_saver.cpp
+    camera/camera_command_queue.cpp
 )
 
 

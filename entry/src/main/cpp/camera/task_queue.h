@@ -8,26 +8,24 @@
 #include <atomic>
 #include <thread>
 #include <cstdint>
+#include "owned_buffer.h"
 
 namespace exposhot {
 
 // 任务数据结构
 struct ImageTask {
     int32_t taskId;           // 任务 ID（第几张, 0-based)
-    void* buffer;             // 图像数据(所有权转移)
-    size_t size;              // 数据大小
+    OwnedBuffer buffer;       // 图像数据(独占所有权，移动语义)
     uint32_t width;           // 图像宽度
     uint32_t height;          // 图像高度
     bool isFirst;             // 是否是第一张(基准帧)
 
-    ImageTask() : taskId(0), buffer(nullptr), size(0), width(0), height(0), isFirst(false) {}
+    ImageTask() : taskId(0), width(0), height(0), isFirst(false) {}
 
     // 移动构造
     ImageTask(ImageTask&& other) noexcept
-        : taskId(other.taskId), buffer(other.buffer),
-          size(other.size), width(other.width), height(other.height), isFirst(other.isFirst) {
-        other.buffer = nullptr;
-        other.size = 0;
+        : taskId(other.taskId), buffer(std::move(other.buffer)),
+          width(other.width), height(other.height), isFirst(other.isFirst) {
         other.width = 0;
         other.height = 0;
     }
@@ -35,33 +33,19 @@ struct ImageTask {
     // 移动赋值
     ImageTask& operator=(ImageTask&& other) noexcept {
         if (this != &other) {
-            // 释放现有资源
-            if (buffer) {
-                free(buffer);
-            }
-            // 移动数据
             taskId = other.taskId;
-            buffer = other.buffer;
-            size = other.size;
+            buffer = std::move(other.buffer);
             width = other.width;
             height = other.height;
             isFirst = other.isFirst;
-            // 置空源对象
-            other.buffer = nullptr;
-            other.size = 0;
             other.width = 0;
             other.height = 0;
         }
         return *this;
     }
 
-    // 析构时释放内存
-    ~ImageTask() {
-        if (buffer) {
-            free(buffer);
-            buffer = nullptr;
-        }
-    }
+    // 析构时 OwnedBuffer 自动释放
+    ~ImageTask() = default;
 
     // 禁止拷贝
     ImageTask(const ImageTask&) = delete;

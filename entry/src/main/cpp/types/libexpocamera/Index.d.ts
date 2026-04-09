@@ -136,7 +136,7 @@ export const registerPhotoErrorCallback: (callback: PhotoErrorCallback) => void;
  * @param resourceManager 可选的资源管理器，用于访问 rawfile（如需使用 mockStackProcess 则必须传入）
  * @returns 0 成功，其他值表示错误码
  */
-export const initCamera: (mode: CaptureMode, resourceManager?: object) => number;
+export const initCamera: (mode: CaptureMode) => number;
 
 /**
  * 释放相机资源

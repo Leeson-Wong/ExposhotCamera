@@ -37,7 +37,7 @@ TaskQueue::~TaskQueue() {
 void TaskQueue::enqueue(ImageTask&& task) {
     std::string producerThread = getThreadId();
     int32_t taskId = task.taskId;
-    size_t taskSize = task.size;
+    size_t taskSize = task.buffer.size();
 
     TQ_LOG_DEBUG("[ENQUEUE_START] taskId=%{public}d, size=%{public}zu, producerThread=%{public}s",
                  taskId, taskSize, producerThread.c_str());
@@ -243,7 +243,7 @@ void TaskQueue::consumerLoop() {
 
             TQ_LOG_INFO("[PROCESS_END] taskId=%{public}d, consumerThread=%{public}s",
                         taskId, consumerThread.c_str());
-        } else if (task.buffer == nullptr) {
+        } else if (!task.buffer) {
             TQ_LOG_WARN("[SKIP_NULL_BUFFER] taskId=%{public}d, buffer is null", task.taskId);
         } else {
             TQ_LOG_WARN("[SKIP_NO_HANDLER] taskId=%{public}d, handler is null", task.taskId);

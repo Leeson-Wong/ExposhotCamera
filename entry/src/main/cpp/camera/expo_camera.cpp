@@ -1,4 +1,6 @@
 #include "expo_camera.h"
+#include "camera_command_queue.h"
+#include "capture_manager.h"
 #include "hilog/log.h"
 
 #undef LOG_DOMAIN
@@ -497,7 +499,7 @@ void ExpoCamera::onError(Camera_PhotoOutput* photoOutput, Camera_ErrorCode error
 
     // 通过回调通知上层（如 CaptureManager）
     ExpoCamera& self = ExpoCamera::getInstance();
-    if (self.photoErrorCallback_) {
+    if (self.photoErrorCallbackValid_.load(std::memory_order_acquire) && self.photoErrorCallback_) {
         self.photoErrorCallback_(static_cast<int32_t>(errorCode));
     }
 }
@@ -596,8 +598,14 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
         uint32_t imgHeight = static_cast<uint32_t>(size.height);
 
         // 通过回调通知上层（如 CaptureManager）
-        if (self.photoCapturedCallback_) {
-            self.photoCapturedCallback_(bufferCopy, nativeBufferSize, imgWidth, imgHeight);
+        // 将 buffer 投递到 CameraCommandQueue，在 CameraCommand 线程上串行处理
+        if (self.photoCallbackValid_.load(std::memory_order_acquire)) {
+            // 通过 CaptureManager 的命令队列投递 PHOTO_AVAILABLE 命令
+            // buffer 所有权转移给命令队列
+            exposhot::CaptureManager::getInstance().getCommandQueue()->post(
+                exposhot::CameraCommand::makePhotoAvailable(bufferCopy, nativeBufferSize, imgWidth, imgHeight));
+            // buffer 所有权已转移，不再由本函数释放
+            bufferCopy = nullptr;
         } else {
             OH_LOG_WARN(LOG_APP, "No photo captured callback registered, buffer will be freed");
             free(bufferCopy);
@@ -615,7 +623,7 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
 }
 
 Camera_ErrorCode ExpoCamera::setZoomRatio(float ratio) {
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
         OH_LOG_ERROR(LOG_APP, "ExpoCamera not initialized");
@@ -654,7 +662,7 @@ Camera_ErrorCode ExpoCamera::getZoomRatio(float* ratio) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *ratio = 1.0f;
@@ -676,7 +684,7 @@ Camera_ErrorCode ExpoCamera::getZoomRatioRange(float* min, float* max) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *min = 1.0f;
@@ -701,7 +709,7 @@ Camera_ErrorCode ExpoCamera::isZoomSupported(bool* supported) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *supported = false;
@@ -724,7 +732,7 @@ Camera_ErrorCode ExpoCamera::isZoomSupported(bool* supported) {
 }
 
 Camera_ErrorCode ExpoCamera::setFocusMode(Camera_FocusMode mode) {
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
         OH_LOG_ERROR(LOG_APP, "ExpoCamera not initialized");
@@ -759,7 +767,7 @@ Camera_ErrorCode ExpoCamera::getFocusMode(Camera_FocusMode* mode) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *mode = Camera_FocusMode::FOCUS_MODE_MANUAL;
@@ -780,7 +788,7 @@ Camera_ErrorCode ExpoCamera::isFocusModeSupported(Camera_FocusMode mode, bool* s
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *supported = false;
@@ -824,7 +832,7 @@ Camera_ErrorCode ExpoCamera::getFocusDistanceRange(float* min, float* max) {
 }
 
 Camera_ErrorCode ExpoCamera::setFocusPoint(float x, float y) {
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
         OH_LOG_ERROR(LOG_APP, "ExpoCamera not initialized");
@@ -852,7 +860,7 @@ Camera_ErrorCode ExpoCamera::getFocusPoint(float* x, float* y) {
         return Camera_ErrorCode::CAMERA_INVALID_ARGUMENT;
     }
 
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || !captureSession_) {
         *x = 0.5f;
@@ -1178,7 +1186,7 @@ void ExpoCamera::subscribeState(const StateCallback& callback) {
 }
 
 void ExpoCamera::unsubscribeState() {
-//    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     stateCallback_ = nullptr;
     OH_LOG_INFO(LOG_APP, "State callback unsubscribed");
 }
@@ -1186,11 +1194,13 @@ void ExpoCamera::unsubscribeState() {
 // ==================== 照片回调注册 ====================
 
 void ExpoCamera::setPhotoCapturedCallback(PhotoCapturedCallback callback) {
+    photoCallbackValid_.store(callback != nullptr, std::memory_order_release);
     photoCapturedCallback_ = callback;
     OH_LOG_INFO(LOG_APP, "Photo captured callback %{public}s", callback ? "registered" : "cleared");
 }
 
 void ExpoCamera::setPhotoErrorCallback(PhotoErrorCallback callback) {
+    photoErrorCallbackValid_.store(callback != nullptr, std::memory_order_release);
     photoErrorCallback_ = callback;
     OH_LOG_INFO(LOG_APP, "Photo error callback %{public}s", callback ? "registered" : "cleared");
 }
