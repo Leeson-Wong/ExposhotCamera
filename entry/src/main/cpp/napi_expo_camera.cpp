@@ -93,9 +93,6 @@ static napi_threadsafe_function g_burstProgressTsfn = nullptr;
 static napi_threadsafe_function g_burstImageTsfn = nullptr;
 static std::mutex g_burstMutex;
 
-// Global ResourceManager（用于访问 rawfile）
-static NativeResourceManager* g_resourceManager = nullptr;
-
 // 当前 sessionId 存储（用于异步回调）
 static std::string g_currentSessionId;
 
@@ -425,8 +422,8 @@ static void onStateChanged(const std::string& state, const std::string& message)
 
 static napi_value InitCamera(napi_env env, napi_callback_info info) {
     // 参数：mode (必填), resourceManager (可选)
-    size_t argc = 2;
-    napi_value args[2] = {nullptr, nullptr};
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     // 解析 mode 参数（第一个参数，必填）
@@ -434,23 +431,6 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
     if (argc >= 1 && args[0] != nullptr) {
         napi_get_value_int32(env, args[0], &modeValue);
         OH_LOG_INFO(LOG_APP, "InitCamera with mode: %{public}d", modeValue);
-    }
-
-    // 初始化 ResourceManager（第二个参数，可选）
-    if (argc >= 2 && args[1] != nullptr) {
-        // 释放之前可能存在的 ResourceManager
-        if (g_resourceManager != nullptr) {
-            OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
-            g_resourceManager = nullptr;
-        }
-        g_resourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[1]);
-        if (g_resourceManager != nullptr) {
-            OH_LOG_INFO(LOG_APP, "ResourceManager initialized successfully");
-        } else {
-            OH_LOG_ERROR(LOG_APP, "Failed to initialize ResourceManager");
-        }
-    } else {
-        OH_LOG_WARN(LOG_APP, "InitCamera called without ResourceManager argument");
     }
 
     // 通过 CaptureManager 初始化（内部会初始化 ExpoCamera 并注册回调）
@@ -466,13 +446,6 @@ static napi_value InitCamera(napi_env env, napi_callback_info info) {
 }
 
 static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
-    // 释放全局 ResourceManager
-    if (g_resourceManager != nullptr) {
-        OH_ResourceManager_ReleaseNativeResourceManager(g_resourceManager);
-        g_resourceManager = nullptr;
-        OH_LOG_INFO(LOG_APP, "ResourceManager released");
-    }
-
     // 通过 CaptureManager 释放（内部会释放 ExpoCamera）
     exposhot::CaptureManager::getInstance().release();
 
@@ -1460,11 +1433,11 @@ static void MockStackExecute(napi_env env, void* data) {
     OH_LOG_INFO(LOG_APP, "MockStackExecute: frameIndex=%{public}d (worker thread)", asyncData->frameIndex);
 
     // 检查 ResourceManager
-    if (g_resourceManager == nullptr) {
-        asyncData->success = false;
-        asyncData->errorMsg = "ResourceManager not initialized";
-        return;
-    }
+//    if (g_resourceManager == nullptr) {
+//        asyncData->success = false;
+//        asyncData->errorMsg = "ResourceManager not initialized";
+//        return;
+//    }
 
     // 选择文件
     asyncData->fileIndex = asyncData->frameIndex % RAW_FILE_COUNT;
@@ -1474,7 +1447,7 @@ static void MockStackExecute(napi_env env, void* data) {
                 asyncData->fileName.c_str(), asyncData->fileIndex);
 
     // 打开 RawFile
-    RawFile* rawFile = OH_ResourceManager_OpenRawFile(g_resourceManager, asyncData->fileName.c_str());
+    RawFile* rawFile = nullptr;
     if (rawFile == nullptr) {
         asyncData->success = false;
         asyncData->errorMsg = "Failed to open rawfile: " + asyncData->fileName;
@@ -1649,18 +1622,18 @@ static napi_value MockStackProcess(napi_env env, napi_callback_info info) {
     napi_create_promise(env, &deferred, &promise);
 
     // 快速检查 ResourceManager
-    if (g_resourceManager == nullptr) {
-        napi_value resultObj;
-        napi_create_object(env, &resultObj);
-        napi_value successValue;
-        napi_get_boolean(env, false, &successValue);
-        napi_set_named_property(env, resultObj, "success", successValue);
-        napi_value errorMsgValue;
-        napi_create_string_utf8(env, "ResourceManager not initialized", NAPI_AUTO_LENGTH, &errorMsgValue);
-        napi_set_named_property(env, resultObj, "error", errorMsgValue);
-        napi_reject_deferred(env, deferred, resultObj);
-        return promise;
-    }
+//    if (g_resourceManager == nullptr) {
+//        napi_value resultObj;
+//        napi_create_object(env, &resultObj);
+//        napi_value successValue;
+//        napi_get_boolean(env, false, &successValue);
+//        napi_set_named_property(env, resultObj, "success", successValue);
+//        napi_value errorMsgValue;
+//        napi_create_string_utf8(env, "ResourceManager not initialized", NAPI_AUTO_LENGTH, &errorMsgValue);
+//        napi_set_named_property(env, resultObj, "error", errorMsgValue);
+//        napi_reject_deferred(env, deferred, resultObj);
+//        return promise;
+//    }
 
     // 创建异步工作数据
     MockStackAsyncData* asyncData = new MockStackAsyncData();
