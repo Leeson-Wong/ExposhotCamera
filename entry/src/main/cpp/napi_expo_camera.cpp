@@ -14,63 +14,9 @@
 #define LOG_DOMAIN 0x3200
 #define LOG_TAG "NapiExpoCamera"
 
-// 全局回调存储（单次拍照）
-// 简化设计：假设只在初始化时注册一次，注册时加锁，调用时只做空指针检查
-static napi_ref g_photoCallbackRef = nullptr;
-static napi_env g_photoEnv = nullptr;
-static std::mutex g_photoCallbackMutex;  // 仅用于注册时的保护
-static size_t g_photoSize = 0;  // 保存照片大小，用于异步回调
-static int32_t g_photoWidth = 0;  // 保存照片宽度
-static int32_t g_photoHeight = 0;  // 保存照片高度
+// ========== Thread-safe callback data structures ==========
 
-// 拍照错误回调存储
-static napi_ref g_photoErrorCallbackRef = nullptr;
-static napi_env g_photoErrorEnv = nullptr;
-static std::mutex g_photoErrorMutex;
-static bool g_photoErrorCallbackValid = false;
-
-// 观察者回调存储
-struct ObserverCallbackInfo {
-    napi_ref callbackRef;
-    napi_env env;
-    std::string slotId;
-};
-static std::map<std::string, ObserverCallbackInfo> g_observerCallbacks;
-static std::mutex g_observerMutex;  // 保护 g_observerCallbacks 的访问
-
-// 状态订阅回调存储
-static napi_ref g_stateCallbackRef = nullptr;
-static napi_env g_stateEnv = nullptr;
-static std::mutex g_stateMutex;
-
-// 连拍相关全局存储
-static napi_ref g_burstProgressCallbackRef = nullptr;
-static napi_ref g_burstImageCallbackRef = nullptr;
-static napi_env g_burstEnv = nullptr;
-static std::mutex g_burstMutex;
-static bool g_burstProgressCallbackValid = false;
-
-// 全局 ResourceManager（用于访问 rawfile）
-static NativeResourceManager* g_resourceManager = nullptr;
-static bool g_burstImageCallbackValid = false;
-
-// 拍照事件回调存储
-static napi_ref g_photoEventCallbackRef = nullptr;
-static napi_env g_photoEventEnv = nullptr;
-static std::mutex g_photoEventMutex;
-
-// 处理事件回调存储
-static napi_ref g_processEventCallbackRef = nullptr;
-static napi_env g_processEventEnv = nullptr;
-static std::mutex g_processEventMutex;
-
-// 当前 sessionId 存储（用于异步回调）
-static std::string g_currentSessionId;
-
-// 保存照片数据，回调数据结构（用于在异步工作间传递数据）
 struct PhotoCallbackData {
-    napi_env env;
-    napi_ref callbackRef;
     std::string sessionId;
     void* buffer;
     size_t size;
@@ -78,16 +24,317 @@ struct PhotoCallbackData {
     uint32_t height;
 };
 
-// 保存照片数据，用于回调（使用异步工作队列）
-// 简化设计：假设注册在初始化时完成，调用时只做空指针检查
+struct PhotoErrorCallbackData {
+    std::string sessionId;
+    int32_t errorCode;
+};
+
+struct ObserverNotifyData {
+    std::string activeSlotId;
+    std::string activeSurfaceId;
+};
+
+struct StateCallbackData {
+    std::string state;
+    std::string message;
+};
+
+struct BurstImageCallbackData {
+    std::string sessionId;
+    void* buffer;
+    size_t size;
+    bool isFinal;
+};
+
+struct BurstProgressCallbackData {
+    exposhot::BurstProgress progress;
+};
+
+// ========== Global thread-safe function handles ==========
+
+// Helper: release a threadsafe_function safely
+static void ReleaseTsfn(napi_threadsafe_function& tsfn) {
+    if (tsfn != nullptr) {
+        napi_release_threadsafe_function(tsfn, napi_tsfn_release);
+        tsfn = nullptr;
+    }
+}
+
+// Photo data callback
+static napi_threadsafe_function g_photoTsfn = nullptr;
+static std::mutex g_photoMutex;
+
+// Photo error callback
+static napi_threadsafe_function g_photoErrorTsfn = nullptr;
+static std::mutex g_photoErrorMutex;
+
+// Observer callbacks
+struct ObserverCallbackInfo {
+    napi_threadsafe_function tsfn;
+    std::string slotId;
+};
+static std::map<std::string, ObserverCallbackInfo> g_observerCallbacks;
+static std::mutex g_observerMutex;
+
+// State callback
+static napi_threadsafe_function g_stateTsfn = nullptr;
+static std::mutex g_stateMutex;
+
+// Photo event callback
+static napi_threadsafe_function g_photoEventTsfn = nullptr;
+static std::mutex g_photoEventMutex;
+
+// Process event callback
+static napi_threadsafe_function g_processEventTsfn = nullptr;
+static std::mutex g_processEventMutex;
+
+// Burst callbacks
+static napi_threadsafe_function g_burstProgressTsfn = nullptr;
+static napi_threadsafe_function g_burstImageTsfn = nullptr;
+static std::mutex g_burstMutex;
+
+// Global ResourceManager（用于访问 rawfile）
+static NativeResourceManager* g_resourceManager = nullptr;
+
+// 当前 sessionId 存储（用于异步回调）
+static std::string g_currentSessionId;
+
+// ========== CallJs functions (executed on JS main thread) ==========
+
+// --- Photo data CallJs ---
+static void PhotoCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    PhotoCallbackData* cbd = static_cast<PhotoCallbackData*>(data);
+    if (!cbd) return;
+
+    OH_LOG_INFO(LOG_APP, "PhotoCallJs sessionId:%{public}s, size:%{public}zu, %{public}ux%{public}u",
+                cbd->sessionId.c_str(), cbd->size, cbd->width, cbd->height);
+
+    void* outputData = nullptr;
+    napi_value arrayBuffer = nullptr;
+    napi_create_arraybuffer(env, cbd->size, &outputData, &arrayBuffer);
+    std::memcpy(outputData, cbd->buffer, cbd->size);
+
+    napi_value imageDataObj;
+    napi_create_object(env, &imageDataObj);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, cbd->sessionId.c_str(), cbd->sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, imageDataObj, "sessionId", sessionIdValue);
+    napi_set_named_property(env, imageDataObj, "buffer", arrayBuffer);
+
+    napi_value widthValue, heightValue;
+    napi_create_uint32(env, cbd->width, &widthValue);
+    napi_create_uint32(env, cbd->height, &heightValue);
+    napi_set_named_property(env, imageDataObj, "width", widthValue);
+    napi_set_named_property(env, imageDataObj, "height", heightValue);
+
+    napi_value isFinalValue;
+    napi_get_boolean(env, true, &isFinalValue);
+    napi_set_named_property(env, imageDataObj, "isFinal", isFinalValue);
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 1, &imageDataObj, &retVal);
+
+    free(cbd->buffer);
+    delete cbd;
+}
+
+// --- Photo error CallJs ---
+static void PhotoErrorCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    PhotoErrorCallbackData* cbd = static_cast<PhotoErrorCallbackData*>(data);
+    if (!cbd) return;
+
+    napi_value errorObj;
+    napi_create_object(env, &errorObj);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, cbd->sessionId.c_str(), cbd->sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, errorObj, "sessionId", sessionIdValue);
+
+    napi_value errorCodeValue;
+    napi_create_int32(env, cbd->errorCode, &errorCodeValue);
+    napi_set_named_property(env, errorObj, "errorCode", errorCodeValue);
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 1, &errorObj, &retVal);
+
+    delete cbd;
+}
+
+// --- Observer notify CallJs ---
+static void ObserverCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    ObserverNotifyData* ond = static_cast<ObserverNotifyData*>(data);
+    if (!ond) return;
+
+    napi_value argv[2];
+    napi_create_string_utf8(env, ond->activeSlotId.c_str(), ond->activeSlotId.length(), &argv[0]);
+    napi_create_string_utf8(env, ond->activeSurfaceId.c_str(), ond->activeSurfaceId.length(), &argv[1]);
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 2, argv, &retVal);
+
+    OH_LOG_INFO(LOG_APP, "ObserverCallJs: activeSlot=%{public}s", ond->activeSlotId.c_str());
+    delete ond;
+}
+
+// --- State change CallJs ---
+static void StateCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    StateCallbackData* scd = static_cast<StateCallbackData*>(data);
+    if (!scd) return;
+
+    napi_value argv[2];
+    napi_create_string_utf8(env, scd->state.c_str(), scd->state.length(), &argv[0]);
+    napi_create_string_utf8(env, scd->message.c_str(), scd->message.length(), &argv[1]);
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 2, argv, &retVal);
+
+    OH_LOG_INFO(LOG_APP, "StateCallJs: %{public}s, %{public}s", scd->state.c_str(), scd->message.c_str());
+    delete scd;
+}
+
+// --- Photo event CallJs ---
+static void PhotoEventCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    exposhot::PhotoEvent* event = static_cast<exposhot::PhotoEvent*>(data);
+    if (!event) return;
+
+    napi_value eventObj;
+    napi_create_object(env, &eventObj);
+
+    napi_value typeValue;
+    napi_create_int32(env, static_cast<int32_t>(event->type), &typeValue);
+    napi_set_named_property(env, eventObj, "type", typeValue);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, eventObj, "sessionId", sessionIdValue);
+
+    if (event->frameIndex >= 0) {
+        napi_value frameIndexValue;
+        napi_create_int32(env, event->frameIndex, &frameIndexValue);
+        napi_set_named_property(env, eventObj, "frameIndex", frameIndexValue);
+    }
+    if (!event->message.empty()) {
+        napi_value messageValue;
+        napi_create_string_utf8(env, event->message.c_str(), event->message.length(), &messageValue);
+        napi_set_named_property(env, eventObj, "message", messageValue);
+    }
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 1, &eventObj, &retVal);
+    delete event;
+}
+
+// --- Process event CallJs ---
+static void ProcessEventCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    exposhot::ProcessEvent* event = static_cast<exposhot::ProcessEvent*>(data);
+    if (!event) return;
+
+    napi_value eventObj;
+    napi_create_object(env, &eventObj);
+
+    napi_value typeValue;
+    napi_create_int32(env, static_cast<int32_t>(event->type), &typeValue);
+    napi_set_named_property(env, eventObj, "type", typeValue);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, eventObj, "sessionId", sessionIdValue);
+
+    napi_value progressValue;
+    napi_create_int32(env, event->progress, &progressValue);
+    napi_set_named_property(env, eventObj, "progress", progressValue);
+
+    napi_value currentFrameValue;
+    napi_create_int32(env, event->currentFrame, &currentFrameValue);
+    napi_set_named_property(env, eventObj, "currentFrame", currentFrameValue);
+
+    napi_value totalFramesValue;
+    napi_create_int32(env, event->totalFrames, &totalFramesValue);
+    napi_set_named_property(env, eventObj, "totalFrames", totalFramesValue);
+
+    if (!event->message.empty()) {
+        napi_value messageValue;
+        napi_create_string_utf8(env, event->message.c_str(), event->message.length(), &messageValue);
+        napi_set_named_property(env, eventObj, "message", messageValue);
+    }
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 1, &eventObj, &retVal);
+    delete event;
+}
+
+// --- Burst image CallJs ---
+static void BurstImageCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    BurstImageCallbackData* cbd = static_cast<BurstImageCallbackData*>(data);
+    if (!cbd) return;
+
+    OH_LOG_INFO(LOG_APP, "BurstImageCallJs sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
+                cbd->sessionId.c_str(), cbd->size, cbd->isFinal);
+
+    void* outputData = nullptr;
+    napi_value arrayBuffer = nullptr;
+    napi_create_arraybuffer(env, cbd->size, &outputData, &arrayBuffer);
+    std::memcpy(outputData, cbd->buffer, cbd->size);
+
+    napi_value isFinalValue;
+    napi_get_boolean(env, cbd->isFinal, &isFinalValue);
+
+    napi_value args[2] = {arrayBuffer, isFinalValue};
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 2, args, &retVal);
+
+    free(cbd->buffer);
+    delete cbd;
+}
+
+// --- Burst progress CallJs ---
+static void BurstProgressCallJs(napi_env env, napi_value js_cb, void* context, void* data) {
+    BurstProgressCallbackData* cbd = static_cast<BurstProgressCallbackData*>(data);
+    if (!cbd) return;
+
+    napi_value progressObj;
+    napi_create_object(env, &progressObj);
+
+    napi_value stateValue;
+    napi_create_int32(env, static_cast<int32_t>(cbd->progress.state), &stateValue);
+    napi_set_named_property(env, progressObj, "state", stateValue);
+
+    napi_value capturedFramesValue;
+    napi_create_int32(env, cbd->progress.capturedFrames, &capturedFramesValue);
+    napi_set_named_property(env, progressObj, "capturedFrames", capturedFramesValue);
+
+    napi_value processedFramesValue;
+    napi_create_int32(env, cbd->progress.processedFrames, &processedFramesValue);
+    napi_set_named_property(env, progressObj, "processedFrames", processedFramesValue);
+
+    napi_value totalFramesValue;
+    napi_create_int32(env, cbd->progress.totalFrames, &totalFramesValue);
+    napi_set_named_property(env, progressObj, "totalFrames", totalFramesValue);
+
+    napi_value messageValue;
+    napi_create_string_utf8(env, cbd->progress.message.c_str(), cbd->progress.message.length(), &messageValue);
+    napi_set_named_property(env, progressObj, "message", messageValue);
+
+    napi_value sessionIdValue;
+    napi_create_string_utf8(env, cbd->progress.sessionId.c_str(), cbd->progress.sessionId.length(), &sessionIdValue);
+    napi_set_named_property(env, progressObj, "sessionId", sessionIdValue);
+
+    napi_value retVal;
+    napi_call_function(env, nullptr, js_cb, 1, &progressObj, &retVal);
+    delete cbd;
+}
+
+// ========== C++ callback functions (called from non-JS threads, use tsfn) ==========
+
 static void onPhotoData(const std::string& sessionId, void* buffer, size_t size, uint32_t width, uint32_t height) {
     if (!buffer || size == 0) {
         OH_LOG_ERROR(LOG_APP, "Invalid buffer in onPhotoData");
         return;
     }
 
-    // 简化：只做空指针检查，不加锁（假设注册已在初始化时完成）
-    if (!g_photoCallbackRef || !g_photoEnv) {
+    std::lock_guard<std::mutex> lock(g_photoMutex);
+    if (!g_photoTsfn) {
         OH_LOG_ERROR(LOG_APP, "Photo callback not registered");
         return;
     }
@@ -95,7 +342,6 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
     OH_LOG_INFO(LOG_APP, "onPhotoData sessionId:%{public}s, size:%{public}zu, %{public}ux%{public}u",
                 sessionId.c_str(), size, width, height);
 
-    // 复制 buffer 数据
     void* copyBuffer = malloc(size);
     if (copyBuffer == nullptr) {
         OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for photo buffer");
@@ -103,107 +349,14 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
     }
     std::memcpy(copyBuffer, buffer, size);
 
-    // 创建回调数据结构
-    PhotoCallbackData* callbackData = new PhotoCallbackData{
-        g_photoEnv,
-        g_photoCallbackRef,
-        sessionId,
-        copyBuffer,
-        size,
-        width,
-        height
-    };
-
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(g_photoEnv, "onPhotoData", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        g_photoEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段（空操作，数据已准备好）
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            PhotoCallbackData* callbackData = static_cast<PhotoCallbackData*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            napi_get_reference_value(envLocal, callbackData->callbackRef, &callback);
-
-            if (callback) {
-                void* outputData = nullptr;
-                napi_value arrayBuffer = nullptr;
-                napi_create_arraybuffer(envLocal, callbackData->size, &outputData, &arrayBuffer);
-                std::memcpy(outputData, callbackData->buffer, callbackData->size);
-
-                OH_LOG_INFO(LOG_APP, "onPhotoData async callback, sessionId: %{public}s, size: %{public}zu",
-                            callbackData->sessionId.c_str(), callbackData->size);
-
-                // 创建 ImageData 对象
-                napi_value imageDataObj;
-                napi_create_object(envLocal, &imageDataObj);
-
-                // 设置 sessionId
-                napi_value sessionIdValue;
-                napi_create_string_utf8(envLocal, callbackData->sessionId.c_str(),
-                                        callbackData->sessionId.length(), &sessionIdValue);
-                napi_set_named_property(envLocal, imageDataObj, "sessionId", sessionIdValue);
-
-                // 设置 buffer
-                napi_set_named_property(envLocal, imageDataObj, "buffer", arrayBuffer);
-
-                // 设置 width 和 height
-                napi_value widthValue;
-                napi_create_uint32(envLocal, callbackData->width, &widthValue);
-                napi_set_named_property(envLocal, imageDataObj, "width", widthValue);
-
-                napi_value heightValue;
-                napi_create_uint32(envLocal, callbackData->height, &heightValue);
-                napi_set_named_property(envLocal, imageDataObj, "height", heightValue);
-
-                // 设置 isFinal (单次拍照始终为 true)
-                napi_value isFinalValue;
-                napi_get_boolean(envLocal, true, &isFinalValue);
-                napi_set_named_property(envLocal, imageDataObj, "isFinal", isFinalValue);
-
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &imageDataObj, &retVal);
-            } else {
-                OH_LOG_ERROR(LOG_APP, "onPhotoData callback is null");
-            }
-
-            // 清理内存
-            free(callbackData->buffer);
-            delete callbackData;
-        },
-        callbackData, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo callback");
-        free(copyBuffer);
-        delete callbackData;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(g_photoEnv, work, napi_qos_user_initiated);
+    PhotoCallbackData* cbd = new PhotoCallbackData{sessionId, copyBuffer, size, width, height};
+    napi_call_threadsafe_function(g_photoTsfn, cbd, napi_tsfn_nonblocking);
 }
 
 // 拍照错误回调（异步通知相机硬件错误）
 static void onPhotoErrorCallback(const std::string& sessionId, int32_t errorCode) {
-    // 在锁保护下获取回调引用
-    napi_env callbackEnv = nullptr;
-    napi_ref callbackRef = nullptr;
-    bool callbackValid = false;
-
-    {
-        std::lock_guard<std::mutex> lock(g_photoErrorMutex);
-        callbackValid = g_photoErrorCallbackValid;
-        callbackEnv = g_photoErrorEnv;
-        callbackRef = g_photoErrorCallbackRef;
-    }
-
-    if (!callbackValid || !callbackRef || !callbackEnv) {
+    std::lock_guard<std::mutex> lock(g_photoErrorMutex);
+    if (!g_photoErrorTsfn) {
         OH_LOG_ERROR(LOG_APP, "Photo error callback not ready");
         return;
     }
@@ -211,142 +364,43 @@ static void onPhotoErrorCallback(const std::string& sessionId, int32_t errorCode
     OH_LOG_ERROR(LOG_APP, "onPhotoErrorCallback sessionId: %{public}s, errorCode: %{public}d",
                  sessionId.c_str(), errorCode);
 
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(callbackEnv, "onPhotoError", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    // 将 sessionId 和 errorCode 作为 data 的一部分传递
-    struct PhotoErrorData {
-        std::string sessionId;
-        int32_t errorCode;
-        napi_env env;
-        napi_ref callbackRef;
-    };
-    PhotoErrorData* errorData = new PhotoErrorData{sessionId, errorCode, callbackEnv, callbackRef};
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        callbackEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段(空操作)
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            PhotoErrorData* errorData = static_cast<PhotoErrorData*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            napi_get_reference_value(envLocal, errorData->callbackRef, &callback);
-            if (callback) {
-                // 创建错误对象
-                napi_value errorObj;
-                napi_create_object(envLocal, &errorObj);
-
-                // 设置 sessionId
-                napi_value sessionIdValue;
-                napi_create_string_utf8(envLocal, errorData->sessionId.c_str(),
-                                        errorData->sessionId.length(), &sessionIdValue);
-                napi_set_named_property(envLocal, errorObj, "sessionId", sessionIdValue);
-
-                // 设置 errorCode
-                napi_value errorCodeValue;
-                napi_create_int32(envLocal, errorData->errorCode, &errorCodeValue);
-                napi_set_named_property(envLocal, errorObj, "errorCode", errorCodeValue);
-
-                // 调用回调
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &errorObj, &retVal);
-            } else {
-                OH_LOG_ERROR(LOG_APP, "onPhotoErrorCallback callback is null");
-            }
-
-            // 清理内存
-            delete errorData;
-        },
-        errorData, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo error callback");
-        delete errorData;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(callbackEnv, work, napi_qos_user_initiated);
+    PhotoErrorCallbackData* cbd = new PhotoErrorCallbackData{sessionId, errorCode};
+    napi_call_threadsafe_function(g_photoErrorTsfn, cbd, napi_tsfn_nonblocking);
 }
 
 // 预览流变化回调（观察者模式 - 通知所有观察者）
-// 参数: activeSlotId - 当前获得预览流的 slot ID
-//       activeSurfaceId - 当前获得预览流的 surface ID
 static void onPreviewObserver(const std::string& activeSlotId, const std::string& activeSurfaceId) {
     OH_LOG_INFO(LOG_APP, "onPreviewObserver called: activeSlotId=%{public}s, activeSurfaceId=%{public}s",
                 activeSlotId.c_str(), activeSurfaceId.c_str());
 
-    // 通知所有观察者（而不仅仅是活跃的观察者）
     std::lock_guard<std::mutex> lock(g_observerMutex);
 
     OH_LOG_INFO(LOG_APP, "Observer callbacks count: %{public}zu", g_observerCallbacks.size());
 
     for (auto& pair : g_observerCallbacks) {
-        ObserverCallbackInfo &info = pair.second;
-        OH_LOG_INFO(LOG_APP, "Processing observer: slotId=%{public}s, hasCallback=%{public}d",
-                    info.slotId.c_str(), info.callbackRef != nullptr);
+        ObserverCallbackInfo& info = pair.second;
+        if (!info.tsfn) continue;
 
-        if (!info.callbackRef) {
-            continue;
-        }
-
-        // 调用 JS callback
-        napi_value callback;
-        napi_status status = napi_get_reference_value(info.env, info.callbackRef, &callback);
-        if (status != napi_ok || !callback) {
-            OH_LOG_WARN(LOG_APP, "Failed to get callback reference for slot: %{public}s, status=%{public}d",
-                        info.slotId.c_str(), status);
-            continue;
-        }
-
-        napi_value argv[2];
-        napi_create_string_utf8(info.env, activeSlotId.c_str(), activeSlotId.length(), &argv[0]);
-        napi_create_string_utf8(info.env, activeSurfaceId.c_str(), activeSurfaceId.length(), &argv[1]);
-
-        napi_value global;
-        napi_get_global(info.env, &global);
-        napi_status callStatus = napi_call_function(info.env, global, callback, 2, argv, nullptr);
-        if (callStatus == napi_ok) {
-            OH_LOG_INFO(LOG_APP, "Observer callback invoked successfully for slot: %{public}s, activeSlot=%{public}s",
-                        info.slotId.c_str(), activeSlotId.c_str());
+        ObserverNotifyData* data = new ObserverNotifyData{activeSlotId, activeSurfaceId};
+        napi_status status = napi_call_threadsafe_function(info.tsfn, data, napi_tsfn_nonblocking);
+        if (status == napi_ok) {
+            OH_LOG_INFO(LOG_APP, "Observer notify queued for slot: %{public}s", info.slotId.c_str());
         } else {
-            OH_LOG_ERROR(LOG_APP, "Failed to invoke observer callback for slot: %{public}s, status=%{public}d",
-                         info.slotId.c_str(), callStatus);
+            OH_LOG_ERROR(LOG_APP, "Failed to queue observer notify for slot: %{public}s", info.slotId.c_str());
+            delete data;
         }
     }
 }
 
 // 状态变化回调（从 C++ 调用 ArkTS）
 static void onStateChanged(const std::string& state, const std::string& message) {
-//    std::lock_guard<std::mutex> lock(g_stateMutex);
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    if (!g_stateTsfn) return;
 
-    if (!g_stateCallbackRef || !g_stateEnv) {
-        return;
-    }
+    StateCallbackData* data = new StateCallbackData{state, message};
+    napi_call_threadsafe_function(g_stateTsfn, data, napi_tsfn_nonblocking);
 
-    napi_env env = g_stateEnv;
-    napi_value callback;
-    napi_get_reference_value(env, g_stateCallbackRef, &callback);
-
-    if (!callback) {
-        return;
-    }
-
-    // 创建参数: state, message
-    napi_value argv[2];
-    napi_create_string_utf8(env, state.c_str(), state.length(), &argv[0]);
-    napi_create_string_utf8(env, message.c_str(), message.length(), &argv[1]);
-
-    // 调用回调
-    napi_value global;
-    napi_get_global(env, &global);
-    napi_call_function(env, global, callback, 2, argv, nullptr);
-
-    OH_LOG_INFO(LOG_APP, "State callback invoked: %{public}s, %{public}s",
+    OH_LOG_INFO(LOG_APP, "onStateChanged queued: %{public}s, %{public}s",
                 state.c_str(), message.c_str());
 }
 
@@ -730,17 +784,15 @@ static napi_value RegisterImageDataCallback(napi_env env, napi_callback_info inf
         return nullptr;
     }
 
-    // 保存回调引用 - 加锁保护注册过程
+    // 创建 threadsafe_function
     {
-        std::lock_guard<std::mutex> lock(g_photoCallbackMutex);
+        std::lock_guard<std::mutex> lock(g_photoMutex);
+        ReleaseTsfn(g_photoTsfn);
 
-        // 释放旧的回调引用
-        if (g_photoCallbackRef && g_photoEnv) {
-            napi_delete_reference(g_photoEnv, g_photoCallbackRef);
-        }
-
-        g_photoEnv = env;
-        napi_create_reference(env, args[0], 1, &g_photoCallbackRef);
+        napi_value workName;
+        napi_create_string_utf8(env, "PhotoCallback", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[0], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, PhotoCallJs, &g_photoTsfn);
     }
 
     // 设置 C++ 层回调（委托给 CaptureManager）
@@ -773,23 +825,15 @@ static napi_value RegisterPhotoErrorCallback(napi_env env, napi_callback_info in
         return nullptr;
     }
 
-    // 保存回调引用
+    // 创建 threadsafe_function
     {
         std::lock_guard<std::mutex> lock(g_photoErrorMutex);
+        ReleaseTsfn(g_photoErrorTsfn);
 
-        // 先标记为无效，防止在更新过程中有回调发生
-        g_photoErrorCallbackValid = false;
-
-        // 释放旧的回调引用
-        if (g_photoErrorCallbackRef && g_photoErrorEnv) {
-            napi_delete_reference(g_photoErrorEnv, g_photoErrorCallbackRef);
-        }
-
-        g_photoErrorEnv = env;
-        napi_create_reference(env, args[0], 1, &g_photoErrorCallbackRef);
-
-        // 标记为有效
-        g_photoErrorCallbackValid = true;
+        napi_value workName;
+        napi_create_string_utf8(env, "PhotoErrorCallback", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[0], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, PhotoErrorCallJs, &g_photoErrorTsfn);
     }
 
     // 设置 C++ 层回调（委托给 CaptureManager）
@@ -807,75 +851,11 @@ static napi_value RegisterPhotoErrorCallback(napi_env env, napi_callback_info in
 
 // 拍照事件回调（内部使用）
 static void onPhotoEventCallback(const exposhot::PhotoEvent& event) {
-    if (!g_photoEventCallbackRef || !g_photoEventEnv) {
-        return;
-    }
+    std::lock_guard<std::mutex> lock(g_photoEventMutex);
+    if (!g_photoEventTsfn) return;
 
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(g_photoEventEnv, "onPhotoEvent", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    // 复制事件数据
     exposhot::PhotoEvent* eventCopy = new exposhot::PhotoEvent(event);
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        g_photoEventEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段(空操作)
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            exposhot::PhotoEvent* event = static_cast<exposhot::PhotoEvent*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            napi_get_reference_value(envLocal, g_photoEventCallbackRef, &callback);
-            if (callback) {
-                // 创建事件对象
-                napi_value eventObj;
-                napi_create_object(envLocal, &eventObj);
-
-                // 设置 type
-                napi_value typeValue;
-                napi_create_int32(envLocal, static_cast<int32_t>(event->type), &typeValue);
-                napi_set_named_property(envLocal, eventObj, "type", typeValue);
-
-                // 设置 sessionId
-                napi_value sessionIdValue;
-                napi_create_string_utf8(envLocal, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
-                napi_set_named_property(envLocal, eventObj, "sessionId", sessionIdValue);
-
-                // 设置 frameIndex (可选)
-                if (event->frameIndex >= 0) {
-                    napi_value frameIndexValue;
-                    napi_create_int32(envLocal, event->frameIndex, &frameIndexValue);
-                    napi_set_named_property(envLocal, eventObj, "frameIndex", frameIndexValue);
-                }
-
-                // 设置 message (可选)
-                if (!event->message.empty()) {
-                    napi_value messageValue;
-                    napi_create_string_utf8(envLocal, event->message.c_str(), event->message.length(), &messageValue);
-                    napi_set_named_property(envLocal, eventObj, "message", messageValue);
-                }
-
-                // 调用回调
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &eventObj, &retVal);
-            }
-
-            // 清理
-            delete event;
-        },
-        eventCopy, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for photo event callback");
-        delete eventCopy;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(g_photoEventEnv, work, napi_qos_user_initiated);
+    napi_call_threadsafe_function(g_photoEventTsfn, eventCopy, napi_tsfn_nonblocking);
 }
 
 // 注册拍照事件回调函数
@@ -897,18 +877,15 @@ static napi_value RegisterPhotoEventCallback(napi_env env, napi_callback_info in
         return nullptr;
     }
 
-    // 保存回调引用
+    // 创建 threadsafe_function
     {
         std::lock_guard<std::mutex> lock(g_photoEventMutex);
+        ReleaseTsfn(g_photoEventTsfn);
 
-        // 释放旧的回调引用
-        if (g_photoEventCallbackRef) {
-            napi_delete_reference(g_photoEventEnv, g_photoEventCallbackRef);
-            g_photoEventCallbackRef = nullptr;
-        }
-
-        g_photoEventEnv = env;
-        napi_create_reference(env, args[0], 1, &g_photoEventCallbackRef);
+        napi_value workName;
+        napi_create_string_utf8(env, "PhotoEventCallback", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[0], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, PhotoEventCallJs, &g_photoEventTsfn);
     }
 
     // 设置 C++ 层回调（委托给 CaptureManager）
@@ -924,83 +901,11 @@ static napi_value RegisterPhotoEventCallback(napi_env env, napi_callback_info in
 
 // 处理事件回调（内部使用）
 static void onProcessEventCallback(const exposhot::ProcessEvent& event) {
-    if (!g_processEventCallbackRef || !g_processEventEnv) {
-        return;
-    }
+    std::lock_guard<std::mutex> lock(g_processEventMutex);
+    if (!g_processEventTsfn) return;
 
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(g_processEventEnv, "onProcessEvent", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    // 复制事件数据
     exposhot::ProcessEvent* eventCopy = new exposhot::ProcessEvent(event);
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        g_processEventEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段(空操作)
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            exposhot::ProcessEvent* event = static_cast<exposhot::ProcessEvent*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            napi_get_reference_value(envLocal, g_processEventCallbackRef, &callback);
-            if (callback) {
-                // 创建事件对象
-                napi_value eventObj;
-                napi_create_object(envLocal, &eventObj);
-
-                // 设置 type
-                napi_value typeValue;
-                napi_create_int32(envLocal, static_cast<int32_t>(event->type), &typeValue);
-                napi_set_named_property(envLocal, eventObj, "type", typeValue);
-
-                // 设置 sessionId
-                napi_value sessionIdValue;
-                napi_create_string_utf8(envLocal, event->sessionId.c_str(), event->sessionId.length(), &sessionIdValue);
-                napi_set_named_property(envLocal, eventObj, "sessionId", sessionIdValue);
-
-                // 设置 progress
-                napi_value progressValue;
-                napi_create_int32(envLocal, event->progress, &progressValue);
-                napi_set_named_property(envLocal, eventObj, "progress", progressValue);
-
-                // 设置 currentFrame
-                napi_value currentFrameValue;
-                napi_create_int32(envLocal, event->currentFrame, &currentFrameValue);
-                napi_set_named_property(envLocal, eventObj, "currentFrame", currentFrameValue);
-
-                // 设置 totalFrames
-                napi_value totalFramesValue;
-                napi_create_int32(envLocal, event->totalFrames, &totalFramesValue);
-                napi_set_named_property(envLocal, eventObj, "totalFrames", totalFramesValue);
-
-                // 设置 message (可选)
-                if (!event->message.empty()) {
-                    napi_value messageValue;
-                    napi_create_string_utf8(envLocal, event->message.c_str(), event->message.length(), &messageValue);
-                    napi_set_named_property(envLocal, eventObj, "message", messageValue);
-                }
-
-                // 调用回调
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &eventObj, &retVal);
-            }
-
-            // 清理
-            delete event;
-        },
-        eventCopy, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for process event callback");
-        delete eventCopy;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(g_processEventEnv, work, napi_qos_user_initiated);
+    napi_call_threadsafe_function(g_processEventTsfn, eventCopy, napi_tsfn_nonblocking);
 }
 
 // 注册处理事件回调函数
@@ -1022,18 +927,15 @@ static napi_value RegisterProcessEventCallback(napi_env env, napi_callback_info 
         return nullptr;
     }
 
-    // 保存回调引用
+    // 创建 threadsafe_function
     {
         std::lock_guard<std::mutex> lock(g_processEventMutex);
+        ReleaseTsfn(g_processEventTsfn);
 
-        // 释放旧的回调引用
-        if (g_processEventCallbackRef) {
-            napi_delete_reference(g_processEventEnv, g_processEventCallbackRef);
-            g_processEventCallbackRef = nullptr;
-        }
-
-        g_processEventEnv = env;
-        napi_create_reference(env, args[0], 1, &g_processEventCallbackRef);
+        napi_value workName;
+        napi_create_string_utf8(env, "ProcessEventCallback", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[0], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, ProcessEventCallJs, &g_processEventTsfn);
     }
 
     // 设置 C++ 层回调（委托给 CaptureManager）
@@ -1179,19 +1081,22 @@ static napi_value RegisterObserver(napi_env env, napi_callback_info info) {
 
     // 注册观察者并获取 slotId
     ExpoCamera& camera = ExpoCamera::getInstance();
+    napi_value callback = args[1];
 
     std::string slotId = camera.registerObserver(
         surfaceId,
-        [env, &args](const std::string &slotId) -> PreviewObserverCallback {
+        [env, callback](const std::string &slotId) -> PreviewObserverCallback {
+            std::lock_guard<std::mutex> lock(g_observerMutex);
             ObserverCallbackInfo& cbInfo = g_observerCallbacks[slotId];
-            cbInfo.env = env;
             cbInfo.slotId = slotId;
-            napi_create_reference(env, args[1], 1, &cbInfo.callbackRef);
-            // 返回一个 callback，捕获 slotId
+
+            napi_value workName;
+            napi_create_string_utf8(env, "ObserverCallback", NAPI_AUTO_LENGTH, &workName);
+            napi_create_threadsafe_function(env, callback, nullptr, workName, 0, 1,
+                                            nullptr, nullptr, nullptr, ObserverCallJs, &cbInfo.tsfn);
             return onPreviewObserver;
         },
         nullptr);
-    
 
     OH_LOG_INFO(LOG_APP, "Observer registered: %{public}s", slotId.c_str());
 
@@ -1220,13 +1125,16 @@ static napi_value UnregisterObserver(napi_env env, napi_callback_info info) {
     std::string slotId(slotIdLen, '\0');
     napi_get_value_string_utf8(env, args[0], &slotId[0], slotIdLen + 1, &slotIdLen);
 
-    // 清理回调引用
-    auto it = g_observerCallbacks.find(slotId);
-    if (it != g_observerCallbacks.end()) {
-        if (it->second.callbackRef) {
-            napi_delete_reference(it->second.env, it->second.callbackRef);
+    // 清理 tsfn
+    {
+        std::lock_guard<std::mutex> lock(g_observerMutex);
+        auto it = g_observerCallbacks.find(slotId);
+        if (it != g_observerCallbacks.end()) {
+            if (it->second.tsfn) {
+                napi_release_threadsafe_function(it->second.tsfn, napi_tsfn_release);
+            }
+            g_observerCallbacks.erase(it);
         }
-        g_observerCallbacks.erase(it);
     }
 
     ExpoCamera& camera = ExpoCamera::getInstance();
@@ -1279,19 +1187,15 @@ static napi_value SubscribeState(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    // 保存回调引用
+    // 创建 threadsafe_function
     {
-//        std::lock_guard<std::mutex> lock(g_stateMutex);
+        std::lock_guard<std::mutex> lock(g_stateMutex);
+        ReleaseTsfn(g_stateTsfn);
 
-        // 释放旧的回调引用
-        if (g_stateCallbackRef) {
-            napi_delete_reference(g_stateEnv, g_stateCallbackRef);
-            g_stateCallbackRef = nullptr;
-        }
-
-        // 创建新的引用
-        g_stateEnv = env;
-        napi_create_reference(env, args[0], 1, &g_stateCallbackRef);
+        napi_value workName;
+        napi_create_string_utf8(env, "StateCallback", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[0], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, StateCallJs, &g_stateTsfn);
     }
 
     // 设置状态回调
@@ -1305,14 +1209,10 @@ static napi_value SubscribeState(napi_env env, napi_callback_info info) {
 
 // 取消订阅相机状态
 static napi_value UnsubscribeState(napi_env env, napi_callback_info info) {
-    // 清理回调引用
+    // 释放 threadsafe_function
     {
-//        std::lock_guard<std::mutex> lock(g_stateMutex);
-
-        if (g_stateCallbackRef) {
-            napi_delete_reference(g_stateEnv, g_stateCallbackRef);
-            g_stateCallbackRef = nullptr;
-        }
+        std::lock_guard<std::mutex> lock(g_stateMutex);
+        ReleaseTsfn(g_stateTsfn);
     }
 
     ExpoCamera& camera = ExpoCamera::getInstance();
@@ -1332,19 +1232,8 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
         return;
     }
 
-    // 在锁保护下获取回调引用
-    napi_env callbackEnv = nullptr;
-    napi_ref callbackRef = nullptr;
-    bool callbackValid = false;
-
-    {
-        std::lock_guard<std::mutex> lock(g_burstMutex);
-        callbackValid = g_burstImageCallbackValid;
-        callbackEnv = g_burstEnv;
-        callbackRef = g_burstImageCallbackRef;
-    }
-
-    if (!callbackValid || !callbackRef || !callbackEnv) {
+    std::lock_guard<std::mutex> lock(g_burstMutex);
+    if (!g_burstImageTsfn) {
         OH_LOG_ERROR(LOG_APP, "Burst image callback not ready");
         return;
     }
@@ -1352,7 +1241,6 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
     OH_LOG_INFO(LOG_APP, "onBurstImageCallback sessionId: %{public}s, size: %{public}zu, isFinal: %{public}d",
                 sessionId.c_str(), size, isFinal);
 
-    // 复制 buffer 数据
     void* copyBuffer = malloc(size);
     if (copyBuffer == nullptr) {
         OH_LOG_ERROR(LOG_APP, "Failed to allocate memory for burst image buffer");
@@ -1360,83 +1248,10 @@ static void onBurstImageCallback(const std::string& sessionId, void* buffer, siz
     }
     std::memcpy(copyBuffer, buffer, size);
 
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(callbackEnv, "onBurstImage", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    // 将 sessionId 和 isFinal 作为 data 的一部分传递
-    struct BurstImageData {
-        std::string sessionId;
-        void* buffer;
-        size_t size;
-        bool isFinal;
-        napi_env env;
-        napi_ref callbackRef;
-    };
-    BurstImageData* imageData = new BurstImageData{sessionId, copyBuffer, size, isFinal, callbackEnv, callbackRef};
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        callbackEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段(空操作)
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            BurstImageData* imageData = static_cast<BurstImageData*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            void* outputData = nullptr;
-            napi_value arrayBuffer = nullptr;
-
-            napi_create_arraybuffer(envLocal, imageData->size, &outputData, &arrayBuffer);
-            std::memcpy(outputData, imageData->buffer, imageData->size);
-
-            // 创建 ImageData 对象
-            napi_value imageDataObj;
-            napi_create_object(envLocal, &imageDataObj);
-
-            // 设置 sessionId
-            napi_value sessionIdValue;
-            napi_create_string_utf8(envLocal, imageData->sessionId.c_str(),
-                                     imageData->sessionId.length(), &sessionIdValue);
-            napi_set_named_property(envLocal, imageDataObj, "sessionId", sessionIdValue);
-
-            // 设置 buffer
-            napi_set_named_property(envLocal, imageDataObj, "buffer", arrayBuffer);
-
-            // 设置 isFinal
-            napi_value isFinalValue;
-            napi_get_boolean(envLocal, imageData->isFinal, &isFinalValue);
-            napi_set_named_property(envLocal, imageDataObj, "isFinal", isFinalValue);
-
-            napi_get_reference_value(envLocal, imageData->callbackRef, &callback);
-            if (callback) {
-                // 传递 2 个参数: buffer, isFinal
-                napi_value args[2];
-                args[0] = arrayBuffer;  // buffer
-                args[1] = isFinalValue; // isFinal
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 2, args, &retVal);
-            } else {
-                OH_LOG_ERROR(LOG_APP, "onBurstImageCallback callback is null");
-            }
-
-            // 清理内存
-            free(imageData->buffer);
-            delete imageData;
-        },
-        imageData, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for burst image callback");
-        free(copyBuffer);
-        delete imageData;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(callbackEnv, work, napi_qos_user_initiated);
+    BurstImageCallbackData* cbd = new BurstImageCallbackData{sessionId, copyBuffer, size, isFinal};
+    napi_call_threadsafe_function(g_burstImageTsfn, cbd, napi_tsfn_nonblocking);
 }
+
 typedef struct {
     uint16_t* data; // RGB 数据 格式：R G B R G B  ......
     uint32_t width;
@@ -1444,6 +1259,7 @@ typedef struct {
     size_t size;
     int error;
 } Rgb16Result;
+
 // 连拍进度回调 (内部使用)
 static void onBurstProgressCallback(const exposhot::BurstProgress& progress) {
     OH_LOG_INFO(LOG_APP, "[BURST_PROGRESS] sessionId=%{public}s, state=%{public}d, captured=%{public}d/%{public}d, processed=%{public}d/%{public}d, msg=%{public}s",
@@ -1453,94 +1269,11 @@ static void onBurstProgressCallback(const exposhot::BurstProgress& progress) {
                 progress.processedFrames, progress.totalFrames,
                 progress.message.c_str());
 
-    // 在锁保护下获取回调引用
-    napi_env callbackEnv = nullptr;
-    napi_ref callbackRef = nullptr;
-    bool callbackValid = false;
+    std::lock_guard<std::mutex> lock(g_burstMutex);
+    if (!g_burstProgressTsfn) return;
 
-    {
-        std::lock_guard<std::mutex> lock(g_burstMutex);
-        callbackValid = g_burstProgressCallbackValid;
-        callbackEnv = g_burstEnv;
-        callbackRef = g_burstProgressCallbackRef;
-    }
-
-    if (!callbackValid || !callbackRef || !callbackEnv) {
-        return;
-    }
-
-    // 创建异步工作
-    napi_value asyncResourceName = nullptr;
-    napi_create_string_utf8(callbackEnv, "onBurstProgress", NAPI_AUTO_LENGTH, &asyncResourceName);
-
-    // 复制进度数据
-    struct BurstProgressData {
-        exposhot::BurstProgress progress;
-        napi_env env;
-        napi_ref callbackRef;
-    };
-    BurstProgressData* progressCopy = new BurstProgressData{progress, callbackEnv, callbackRef};
-
-    napi_async_work work;
-    napi_status status = napi_create_async_work(
-        callbackEnv, nullptr, asyncResourceName,
-        [](napi_env envLocal, void* data) {
-            // 异步执行阶段(空操作)
-        },
-        [](napi_env envLocal, napi_status status, void* data) {
-            BurstProgressData* progressData = static_cast<BurstProgressData*>(data);
-
-            // 主线程回调阶段
-            napi_value callback = nullptr;
-            napi_get_reference_value(envLocal, progressData->callbackRef, &callback);
-            if (callback) {
-                // 创建进度对象
-                napi_value progressObj;
-                napi_create_object(envLocal, &progressObj);
-
-                // 设置属性
-                napi_value stateValue;
-                napi_create_int32(envLocal, static_cast<int32_t>(progressData->progress.state), &stateValue);
-                napi_set_named_property(envLocal, progressObj, "state", stateValue);
-
-                napi_value capturedFramesValue;
-                napi_create_int32(envLocal, progressData->progress.capturedFrames, &capturedFramesValue);
-                napi_set_named_property(envLocal, progressObj, "capturedFrames", capturedFramesValue);
-
-                napi_value processedFramesValue;
-                napi_create_int32(envLocal, progressData->progress.processedFrames, &processedFramesValue);
-                napi_set_named_property(envLocal, progressObj, "processedFrames", processedFramesValue);
-
-                napi_value totalFramesValue;
-                napi_create_int32(envLocal, progressData->progress.totalFrames, &totalFramesValue);
-                napi_set_named_property(envLocal, progressObj, "totalFrames", totalFramesValue);
-
-                napi_value messageValue;
-                napi_create_string_utf8(envLocal, progressData->progress.message.c_str(), progressData->progress.message.length(), &messageValue);
-                napi_set_named_property(envLocal, progressObj, "message", messageValue);
-
-                // 设置 sessionId
-                napi_value sessionIdValue;
-                napi_create_string_utf8(envLocal, progressData->progress.sessionId.c_str(), progressData->progress.sessionId.length(), &sessionIdValue);
-                napi_set_named_property(envLocal, progressObj, "sessionId", sessionIdValue);
-
-                // 调用回调
-                napi_value retVal;
-                napi_call_function(envLocal, nullptr, callback, 1, &progressObj, &retVal);
-            }
-
-            // 清理
-            delete progressData;
-        },
-        progressCopy, &work);
-
-    if (status != napi_ok) {
-        OH_LOG_ERROR(LOG_APP, "Failed to create async work for burst progress callback");
-        delete progressCopy;
-        return;
-    }
-
-    napi_queue_async_work_with_qos(callbackEnv, work, napi_qos_user_initiated);
+    BurstProgressCallbackData* cbd = new BurstProgressCallbackData{progress};
+    napi_call_threadsafe_function(g_burstProgressTsfn, cbd, napi_tsfn_nonblocking);
 }
 
 // 开始连拍
@@ -1569,28 +1302,24 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
         napi_get_value_bool(env, realtimePreviewValue, &realtimePreview);
     }
 
-    // 保存进度回调引用
+    // 保存进度回调 - 创建 threadsafe_function
     if (argc >= 2 && args[1] != nullptr) {
         std::lock_guard<std::mutex> lock(g_burstMutex);
-        g_burstProgressCallbackValid = false;
-        if (g_burstProgressCallbackRef && g_burstEnv) {
-            napi_delete_reference(g_burstEnv, g_burstProgressCallbackRef);
-        }
-        g_burstEnv = env;
-        napi_create_reference(env, args[1], 1, &g_burstProgressCallbackRef);
-        g_burstProgressCallbackValid = true;
+        ReleaseTsfn(g_burstProgressTsfn);
+        napi_value workName;
+        napi_create_string_utf8(env, "BurstProgress", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[1], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, BurstProgressCallJs, &g_burstProgressTsfn);
     }
 
-    // 保存图像回调引用
+    // 保存图像回调 - 创建 threadsafe_function
     if (argc >= 3 && args[2] != nullptr) {
         std::lock_guard<std::mutex> lock(g_burstMutex);
-        g_burstImageCallbackValid = false;
-        if (g_burstImageCallbackRef && g_burstEnv) {
-            napi_delete_reference(g_burstEnv, g_burstImageCallbackRef);
-        }
-        g_burstEnv = env;
-        napi_create_reference(env, args[2], 1, &g_burstImageCallbackRef);
-        g_burstImageCallbackValid = true;
+        ReleaseTsfn(g_burstImageTsfn);
+        napi_value workName;
+        napi_create_string_utf8(env, "BurstImage", NAPI_AUTO_LENGTH, &workName);
+        napi_create_threadsafe_function(env, args[2], nullptr, workName, 0, 1,
+                                        nullptr, nullptr, nullptr, BurstImageCallJs, &g_burstImageTsfn);
     }
 
     // 设置回调
@@ -1627,11 +1356,11 @@ static napi_value StartBurstCapture(napi_env env, napi_callback_info info) {
 
 // 取消连拍
 static napi_value CancelBurstCapture(napi_env env, napi_callback_info info) {
-    // 先清除回调有效性，防止新的异步工作被创建
+    // 释放 threadsafe_function，防止新的调用被投递
     {
         std::lock_guard<std::mutex> lock(g_burstMutex);
-        g_burstProgressCallbackValid = false;
-        g_burstImageCallbackValid = false;
+        ReleaseTsfn(g_burstProgressTsfn);
+        ReleaseTsfn(g_burstImageTsfn);
     }
 
     exposhot::CaptureManager::getInstance().cancelBurst();

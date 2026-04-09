@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(exposhot_camera)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+
 add_definitions(-DLIBRAW_BUILDLIB -D_ENABLE_EXTENDED_ALIGNED_STORAGE)
 if(DEFINED PACKAGE_FIND_FILE)
     include(${PACKAGE_FIND_FILE})
