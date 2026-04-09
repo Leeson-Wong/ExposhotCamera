@@ -38,6 +38,8 @@ struct TestBurstCapture {
   private surfaceId: string = '';
   private xComponentController: XComponentController = new XComponentController();
   private countdownTimer: number = -1;  // 倒计时定时器 ID
+  // 持有当前正在处理的 buffer，防止 await 期间 GC 回收 ArrayBuffer
+  private processingBuffer: ArrayBuffer | null = null;
 
   aboutToAppear(): void {
     // 连拍模式使用 startBurstCapture 的回调参数接收图像，不需要注册全局回调
@@ -102,9 +104,11 @@ struct TestBurstCapture {
     if (!isFinal) {
       return
     }
+    // 用实例变量持有 buffer，防止 await 期间 GC 回收 ArrayBuffer
+    this.processingBuffer = buffer;
     let imageSource: image.ImageSource | undefined;
     try {
-      imageSource = image.createImageSource(buffer);
+      imageSource = image.createImageSource(this.processingBuffer!);
       const pixelMap = await imageSource.createPixelMap();
 
       if (isFinal) {
@@ -128,6 +132,7 @@ struct TestBurstCapture {
     } finally {
       // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
       imageSource?.release();
+      this.processingBuffer = null;
     }
   }
 

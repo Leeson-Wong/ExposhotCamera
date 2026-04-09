@@ -55,6 +55,8 @@ struct TestFullFeatures {
 
   // 防抖：防止并发处理图像
   private isProcessingImage: boolean = false;
+  // 持有当前正在处理的 buffer，防止 await 期间 GC 回收 ArrayBuffer
+  private processingBuffer: ArrayBuffer | null = null;
   private xComponentControllerA: XComponentController = new XComponentController();
   private xComponentControllerB: XComponentController = new XComponentController();
 
@@ -157,6 +159,8 @@ struct TestFullFeatures {
       return;
     }
     this.isProcessingImage = true;
+    // 用实例变量持有 buffer，防止 await 期间 GC 回收 ArrayBuffer
+    this.processingBuffer = buffer;
     try {
       // 先释放旧的 PixelMap
       if (this.capturedImage) {
@@ -164,7 +168,7 @@ struct TestFullFeatures {
         this.capturedImage = undefined;
       }
 
-      const imageSource = image.createImageSource(buffer);
+      const imageSource = image.createImageSource(this.processingBuffer!);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
       // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
@@ -172,6 +176,7 @@ struct TestFullFeatures {
     } catch (error) {
       console.error('Failed to process photo buffer:', error);
     } finally {
+      this.processingBuffer = null;
       this.isProcessingImage = false;
     }
   }
