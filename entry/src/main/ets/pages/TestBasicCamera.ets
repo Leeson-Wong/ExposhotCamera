@@ -35,6 +35,8 @@ struct TestBasicCamera {
   private surfaceId: string = ''
   // 防抖：防止并发处理图像
   private isProcessingImage: boolean = false;
+  // 持有当前正在处理的 buffer，防止 await 期间 GC 回收 ArrayBuffer
+  private processingBuffer: ArrayBuffer | null = null;
   private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
@@ -112,6 +114,10 @@ struct TestBasicCamera {
       return;
     }
     this.isProcessingImage = true;
+
+    // 用实例变量持有 buffer 引用，确保 await 期间 GC 不会回收 ArrayBuffer
+    this.processingBuffer = data.buffer;
+
     try {
       // 先释放旧的 PixelMap，避免内存泄漏
       if (this.capturedImage) {
@@ -119,7 +125,7 @@ struct TestBasicCamera {
         this.capturedImage = undefined;
       }
 
-      const imageSource = image.createImageSource(data.buffer);
+      const imageSource = image.createImageSource(this.processingBuffer!);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
       // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
@@ -129,6 +135,7 @@ struct TestBasicCamera {
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process image: %{public}s', JSON.stringify(error));
     } finally {
+      this.processingBuffer = null;
       this.isProcessingImage = false;
     }
   }
