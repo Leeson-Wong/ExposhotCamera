@@ -108,13 +108,15 @@ struct TestBurstCapture {
     this.processingBuffer = buffer;
     let imageSource: image.ImageSource | undefined;
     try {
-      imageSource = image.createImageSource(this.processingBuffer!);
+      // slice(0) 创建独立副本，解耦 Native 层与 JS GC
+      const ownedBuffer = this.processingBuffer!.slice(0);
+      imageSource = image.createImageSource(ownedBuffer);
       const pixelMap = await imageSource.createPixelMap();
 
       if (isFinal) {
         // 先释放旧的最终结果
         if (this.finalImage) {
-          this.finalImage.release();
+          await this.finalImage.release();
           this.finalImage = undefined;
         }
         // 最终堆叠结果
@@ -127,11 +129,16 @@ struct TestBurstCapture {
         this.thumbnailList.push(pixelMap);
         hilog.info(DOMAIN, TAG, 'Preview image received, total: %{public}d', this.thumbnailList.length);
       }
+      // await release 确保安全释放
+      await imageSource.release();
+      imageSource = undefined;
     } catch (error) {
       hilog.error(DOMAIN, TAG, 'Failed to process photo buffer: %{public}s', JSON.stringify(error));
+      // 出错时也要尝试释放
+      if (imageSource) {
+        try { await imageSource.release(); } catch (_) { /* ignore */ }
+      }
     } finally {
-      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
-      imageSource?.release();
       this.processingBuffer = null;
     }
   }

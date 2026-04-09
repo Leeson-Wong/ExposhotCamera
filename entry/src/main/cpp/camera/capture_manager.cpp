@@ -486,6 +486,9 @@ void CaptureManager::onBurstPhotoCaptured(void* buffer, size_t size, uint32_t wi
         }
         memcpy(copyBuffer, buffer, size);
 
+        // 释放上层（ExpoCamera::onPhotoAvailable）传入的原始缓冲区
+        free(buffer);
+
         // 创建任务并入队
         ImageTask task;
         task.taskId = frameIndex;

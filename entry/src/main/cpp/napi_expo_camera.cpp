@@ -133,9 +133,18 @@ static void PhotoCallJs(napi_env env, napi_value js_cb, void* context, void* dat
     napi_set_named_property(env, imageDataObj, "isFinal", isFinalValue);
 
     napi_value retVal;
-    napi_call_function(env, nullptr, js_cb, 1, &imageDataObj, &retVal);
+    napi_status status = napi_call_function(env, nullptr, js_cb, 1, &imageDataObj, &retVal);
 
-    free(cbd->buffer);
+    // 检查 JS 异常：如果回调中发生了未捕获的异常，先清除再继续
+    if (status != napi_ok) {
+        napi_value exception = nullptr;
+        napi_get_and_clear_last_exception(env, &exception);
+        OH_LOG_ERROR(LOG_APP, "PhotoCallJs: napi_call_function failed, status=%{public}d", status);
+    }
+
+    if (cbd->buffer) {
+        free(cbd->buffer);
+    }
     delete cbd;
 }
 
@@ -282,7 +291,14 @@ static void BurstImageCallJs(napi_env env, napi_value js_cb, void* context, void
 
     napi_value args[2] = {arrayBuffer, isFinalValue};
     napi_value retVal;
-    napi_call_function(env, nullptr, js_cb, 2, args, &retVal);
+    napi_status status = napi_call_function(env, nullptr, js_cb, 2, args, &retVal);
+
+    // 检查 JS 异常
+    if (status != napi_ok) {
+        napi_value exception = nullptr;
+        napi_get_and_clear_last_exception(env, &exception);
+        OH_LOG_ERROR(LOG_APP, "BurstImageCallJs: napi_call_function failed, status=%{public}d", status);
+    }
 
     free(cbd->buffer);
     delete cbd;
@@ -348,6 +364,9 @@ static void onPhotoData(const std::string& sessionId, void* buffer, size_t size,
         return;
     }
     std::memcpy(copyBuffer, buffer, size);
+
+    // 释放上层（ExpoCamera::onPhotoAvailable）传入的原始缓冲区
+    free(buffer);
 
     PhotoCallbackData* cbd = new PhotoCallbackData{sessionId, copyBuffer, size, width, height};
     napi_call_threadsafe_function(g_photoTsfn, cbd, napi_tsfn_nonblocking);

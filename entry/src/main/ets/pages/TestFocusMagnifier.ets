@@ -234,7 +234,7 @@ struct TestFocusMagnifier {
 
       // 先释放旧的 PixelMap
       if (this.magnifierPixelMap) {
-        this.magnifierPixelMap.release();
+        await this.magnifierPixelMap.release();
       }
       this.magnifierPixelMap = croppedPixelMap;
       this.magnifierX = touchX;

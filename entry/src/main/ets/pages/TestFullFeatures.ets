@@ -164,15 +164,17 @@ struct TestFullFeatures {
     try {
       // 先释放旧的 PixelMap
       if (this.capturedImage) {
-        this.capturedImage.release();
+        await this.capturedImage.release();
         this.capturedImage = undefined;
       }
 
-      const imageSource = image.createImageSource(this.processingBuffer!);
+      // slice(0) 创建独立副本，解耦 Native 层与 JS GC
+      const ownedBuffer = this.processingBuffer!.slice(0);
+      const imageSource = image.createImageSource(ownedBuffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
-      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
-      imageSource.release();
+      // await release 确保安全释放
+      await imageSource.release();
     } catch (error) {
       console.error('Failed to process photo buffer:', error);
     } finally {

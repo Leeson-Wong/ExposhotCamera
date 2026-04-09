@@ -121,15 +121,17 @@ struct TestBasicCamera {
     try {
       // 先释放旧的 PixelMap，避免内存泄漏
       if (this.capturedImage) {
-        this.capturedImage.release();
+        await this.capturedImage.release();
         this.capturedImage = undefined;
       }
 
-      const imageSource = image.createImageSource(this.processingBuffer!);
+      // slice(0) 创建独立副本，解耦 Native 层与 JS GC
+      const ownedBuffer = this.processingBuffer!.slice(0);
+      const imageSource = image.createImageSource(ownedBuffer);
       const pixelMap = await imageSource.createPixelMap();
       this.capturedImage = pixelMap;
-      // 显式释放 ImageSource，避免 GC 延迟回收时 EXIF 野指针崩溃
-      imageSource.release();
+      // await release 确保安全释放
+      await imageSource.release();
       hilog.info(DOMAIN, TAG, 'Image processed: %{public}dx%{public}d', data.width, data.height);
       this.cameraStatus = '拍照成功，已显示';
     } catch (error) {
