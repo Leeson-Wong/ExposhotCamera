@@ -607,9 +607,23 @@ void ExpoCamera::onPhotoAvailable(Camera_PhotoOutput* photoOutput, OH_PhotoNativ
     }
 
     // 释放资源
-    delete[] components;
-    OH_NativeBuffer_Unmap(nativeBuffer);
-    OH_ImageNative_Release(imageNative);
+    if (components) {
+        delete[] components;
+    }
+
+    if (nativeBuffer && virAddr) {
+        int32_t ret = OH_NativeBuffer_Unmap(nativeBuffer);
+        if (ret != 0) {
+            OH_LOG_ERROR(LOG_APP, "Unmap buffer failed: %{public}d", ret);
+        }
+    }
+    
+    if (photo) {
+        int32_t ret = OH_PhotoNative_Release(photo);
+        if (ret != 0) {
+            OH_LOG_ERROR(LOG_APP, "Release photo failed: %{public}d", ret);
+        }
+    }
 
     OH_LOG_INFO(LOG_APP, "onPhotoAvailable end");
 }
