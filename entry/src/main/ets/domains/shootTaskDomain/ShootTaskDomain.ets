@@ -76,7 +76,7 @@ class ShootTaskDomain {
     if (!this.runningShootTask) return
     let taskParam = this.runningShootTask.getParam()
     if (!taskParam) return
-    taskParam.aperture && ( taskParam.shootCount = aperture )
+    taskParam.aperture && ( taskParam.aperture = aperture )
     this.runningShootTask.setParam(taskParam)
   }
 
