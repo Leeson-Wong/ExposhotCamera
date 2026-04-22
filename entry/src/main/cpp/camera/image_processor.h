@@ -7,7 +7,6 @@
 #include <functional>
 #include <string>
 #include <opencv2/opencv.hpp>
-#include "motion_stack.h"
 #include "file_saver.h"
 
 #include "libraw.h"

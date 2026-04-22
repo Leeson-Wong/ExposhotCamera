@@ -14,7 +14,6 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/camera
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libraw/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_stack/include
     ${OPENCV_PATH}/include/opencv4
 )
 
@@ -79,7 +78,6 @@ target_link_libraries(expocamera PUBLIC
     libimage_source.so
     libimage_packer_ndk.z.so
     libimage_packer.so
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/motion_stack/lib/libmotion_stack.so
     ${OPENCV_PATH}/lib/libopencv_calib3d.so.408
     ${OPENCV_PATH}/lib/libopencv_core.so.408
     ${OPENCV_PATH}/lib/libopencv_dnn.so.408

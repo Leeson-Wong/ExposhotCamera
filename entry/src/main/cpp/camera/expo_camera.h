@@ -123,7 +123,7 @@ public:
     void setPhotoCapturedCallback(PhotoCapturedCallback callback);
     void setPhotoErrorCallback(PhotoErrorCallback callback);
 
-private:
+public:
     ExpoCamera();
     ~ExpoCamera();
     ExpoCamera(const ExpoCamera&) = delete;
